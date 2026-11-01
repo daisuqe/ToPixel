@@ -312,8 +312,10 @@ $('showGrid').addEventListener('change', drawOverlay);
 $('zoom').addEventListener('change', layoutOut);
 
 // ---------- image loading ----------
+let srcName = '';   // base name of the loaded file (empty for pasted images)
 function loadBlob(blob) {
   if (!blob || $('appDlg')) return;
+  srcName = (blob.name || '').replace(/\.[^.\\/]*$/, '');
   const url = URL.createObjectURL(blob);
   const im = new Image();
   im.onload = () => {
@@ -921,7 +923,7 @@ function drawOverlay() {
 $('btnSave').onclick = () => {
   outC.toBlob(b => {
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(b); a.download = `pixel_${outC.width}x${outC.height}.png`;
+    a.href = URL.createObjectURL(b); a.download = `${srcName || 'pixel'}_${outC.width}x${outC.height}.png`;
     a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }, 'image/png');
 };
