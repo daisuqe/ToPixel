@@ -15,6 +15,11 @@
   main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   h1 { font-size: 17px; margin: 0 0 4px; }
   .sub { color: var(--dim); font-size: 12px; margin-bottom: 12px; }
+  details.sec { margin: 12px 0 0; }
+  details.sec > summary { list-style: none; cursor: pointer; font-size: 13px; color: var(--acc); border-bottom: 1px solid var(--line); padding: 3px 0; margin-bottom: 6px; user-select: none; }
+  details.sec > summary::-webkit-details-marker { display: none; }
+  details.sec > summary::before { content: "\25BC"; display: inline-block; width: 1.4em; font-size: 10px; }
+  details.sec:not([open]) > summary::before { content: "\25B6"; }
   h2 { font-size: 13px; color: var(--acc); margin: 16px 0 6px; border-bottom: 1px solid var(--line); padding-bottom: 3px; }
   button, .btn { background: #323744; color: var(--fg); border: 1px solid var(--line); border-radius: 5px; padding: 6px 10px; cursor: pointer; font: inherit; }
   button:hover, .btn:hover { background: #3d4352; }
@@ -50,6 +55,9 @@
 <aside>
   <h1>ToPixel</h1>
   <div class="sub">大きなドット絵を 1ドット=1ピクセル に戻す</div>
+  <select id="lang" title="Language" style="margin-bottom:8px;background:#181a1f;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px">
+    <option value="ja">日本語</option><option value="en">English</option><option value="ko">한국어</option><option value="zh">中文</option>
+  </select>
 
   <div class="row">
     <button class="primary" id="btnOpen">画像を開く</button>
@@ -78,17 +86,21 @@
   <div class="hint">中心寄り: 0=マス全体の平均 / 100=中心の1点<br>多数決: 0=無効 / 大きいほど、マス内で最も多い色の集まりに寄せる</div>
 
   <h2>出力</h2>
+  <label class="chk"><input type="checkbox" id="transBg">背景を透過にする(べた塗り背景を自動検出)</label>
+  <div id="bgCtl"></div>
+  <label class="chk"><input type="checkbox" id="islandTrans">島(囲まれた背景色の部分)も透過にする</label>
+  <div class="hint">画像の外周がほぼ一色のときだけ、その色(許容量以内)を外周から塗りつぶして透過にします。すでに透過している画像は変わりません。</div>
   <label class="chk"><input type="checkbox" id="crop">周囲の余白を切り取る(最小の長方形)</label>
   <label class="chk"><input type="checkbox" id="makeSquare">短辺を長辺に合わせて正方形にする</label>
   <div class="hint">余白は透明部分(透明が無ければ左上の色)を基準に判定します</div>
   <label class="chk"><input type="checkbox" id="resizeOn">強制リサイズ(輪郭を保って塗りを伸縮)</label>
   <div class="ctl"><div class="inp">幅 <input type="number" id="rw" min="1" max="2048"> 高さ <input type="number" id="rh" min="1" max="2048"></div></div>
   <div class="hint" id="rInfo">暗い輪郭ピクセルは削らず、塗りの部分から縦横のシームを削除/複製して目標サイズに合わせます。切り取りの後・正方形化の前に適用します。</div>
-  <div class="row">
+  <div class="row" data-keep>
     <button id="btnSave" disabled>PNG保存</button>
     <button id="btnCopy" disabled>クリップボードへコピー</button>
   </div>
-  <div id="info"></div>
+  <div id="info" data-keep></div>
 </aside>
 
 <main>
@@ -115,9 +127,118 @@
 (() => {
 'use strict';
 const $ = id => document.getElementById(id);
+
+// ---------- i18n (Japanese is the source language; the table maps it to en / ko / zh) ----------
+const T = {
+  'ToPixel - ドット絵を1ドット1ピクセルに': { en: 'ToPixel - Downscale pixel art to 1 dot = 1 px', ko: 'ToPixel - 도트 그림을 1도트=1픽셀로', zh: 'ToPixel - 将像素画还原为1点=1像素' },
+  '大きなドット絵を 1ドット=1ピクセル に戻す': { en: 'Restore enlarged pixel art to 1 dot = 1 pixel', ko: '확대된 도트 그림을 1도트=1픽셀로 되돌립니다', zh: '将放大的像素画还原为 1点=1像素' },
+  '画像を開く': { en: 'Open image', ko: '이미지 열기', zh: '打开图片' },
+  '貼り付け': { en: 'Paste', ko: '붙여넣기', zh: '粘贴' },
+  'Ctrl+V・ドラッグ&ドロップでも読み込めます': { en: 'You can also load with Ctrl+V or drag & drop', ko: 'Ctrl+V, 드래그 앤 드롭으로도 불러올 수 있습니다', zh: '也可以用 Ctrl+V 或拖放载入' },
+  'グリッド解析': { en: 'Grid analysis', ko: '그리드 분석', zh: '网格分析' },
+  '自動解析': { en: 'Auto detect', ko: '자동 분석', zh: '自动分析' },
+  'グリッド方式': { en: 'Grid mode', ko: '그리드 방식', zh: '网格方式' },
+  '不均一・四角形(線が曲がる)': { en: 'Uneven - quadrilateral (curved lines)', ko: '불균일·사각형(선이 휨)', zh: '不均匀·四边形(线条可弯曲)' },
+  '不均一・長方形(直線)': { en: 'Uneven - rectangular (straight lines)', ko: '불균일·직사각형(직선)', zh: '不均匀·矩形(直线)' },
+  '均一': { en: 'Uniform', ko: '균일', zh: '均匀' },
+  'AI生成画像のようにドット幅が揺れる場合は不均一。数値を手で変えると均一に切り替わります': { en: 'Use uneven when the dot size wobbles, as in AI-generated images. Editing the numbers switches to uniform.', ko: 'AI 생성 이미지처럼 도트 크기가 흔들리면 불균일을 사용하세요. 숫자를 직접 바꾸면 균일로 전환됩니다.', zh: '对于点大小不一致的 AI 生成图,请使用不均匀。手动修改数值会切换为均匀。' },
+  '輪郭を1ピクセルに寄せる': { en: 'Snap to 1-pixel outline', ko: '윤곽을 1픽셀로 맞추기', zh: '将轮廓对齐为1像素' },
+  '読み込み時に自動判定します。ONだと暗い輪郭線の境目にグリッドを優先して合わせます': { en: 'Detected automatically on load. When ON, the grid is fitted preferentially to the edges of dark outlines.', ko: '불러올 때 자동 판정합니다. ON이면 어두운 윤곽선의 경계에 그리드를 우선 맞춥니다.', zh: '载入时自动判定。开启后网格会优先贴合深色轮廓线的边界。' },
+  '縦横を同じサイズにする(均一時)': { en: 'Same width and height (uniform mode)', ko: '가로세로를 같은 크기로(균일 시)', zh: '宽高相同(均匀时)' },
+  '元画像にグリッドを重ねる': { en: 'Overlay grid on source', ko: '원본 이미지에 그리드 겹치기', zh: '在原图上叠加网格' },
+  '色の取得': { en: 'Color sampling', ko: '색 추출', zh: '取色' },
+  '中心寄り: 0=マス全体の平均 / 100=中心の1点': { en: 'Center bias: 0 = average of the whole cell / 100 = center point only', ko: '중심 쏠림: 0=칸 전체 평균 / 100=중심 1점', zh: '偏向中心:0=整格平均 / 100=仅中心一点' },
+  '多数決: 0=無効 / 大きいほど、マス内で最も多い色の集まりに寄せる': { en: 'Majority: 0 = off / higher = closer to the most common color cluster in the cell', ko: '다수결: 0=무효 / 클수록 칸 안에서 가장 많은 색 무리에 가깝게', zh: '多数决:0=关闭 / 越大越接近格内最多的颜色群' },
+  '出力': { en: 'Output', ko: '출력', zh: '输出' },
+  '背景を透過にする(べた塗り背景を自動検出)': { en: 'Make background transparent (auto-detect solid background)', ko: '배경을 투명하게(단색 배경 자동 감지)', zh: '背景透明化(自动检测纯色背景)' },
+  '島(囲まれた背景色の部分)も透過にする': { en: 'Also make islands (enclosed background-colored areas) transparent', ko: '섬(둘러싸인 배경색 영역)도 투명하게', zh: '同时透明化孤岛(被围住的背景色区域)' },
+  '画像の外周がほぼ一色のときだけ、その色(許容量以内)を外周から塗りつぶして透過にします。すでに透過している画像は変わりません。': { en: 'Only when the image border is almost one color, that color (within tolerance) is flood-filled from the border and made transparent. Already transparent images are unchanged.', ko: '이미지 외곽이 거의 한 가지 색일 때만, 그 색(허용량 이내)을 외곽에서부터 채워 투명하게 합니다. 이미 투명한 이미지는 변하지 않습니다.', zh: '仅当图像外围几乎是同一种颜色时,才从外围开始填充该颜色(容差范围内)并设为透明。已透明的图像不会改变。' },
+  '周囲の余白を切り取る(最小の長方形)': { en: 'Crop margins (smallest rectangle)', ko: '주변 여백 잘라내기(최소 직사각형)', zh: '裁掉周围空白(最小矩形)' },
+  '短辺を長辺に合わせて正方形にする': { en: 'Pad the short side to the long side to make it square', ko: '짧은 변을 긴 변에 맞춰 정사각형으로', zh: '将短边补到与长边相同,变为正方形' },
+  '余白は透明部分(透明が無ければ左上の色)を基準に判定します': { en: 'Margins are judged by transparent areas (or the top-left color if there is no transparency).', ko: '여백은 투명 부분(투명이 없으면 좌상단 색)을 기준으로 판정합니다.', zh: '空白以透明部分为准(没有透明时以左上角颜色为准)。' },
+  '強制リサイズ(輪郭を保って塗りを伸縮)': { en: 'Force resize (keep outlines, stretch fills)', ko: '강제 리사이즈(윤곽 유지, 채색부 신축)', zh: '强制调整大小(保留轮廓,伸缩填色部分)' },
+  '幅': { en: 'Width', ko: '너비', zh: '宽' },
+  '高さ': { en: 'Height', ko: '높이', zh: '高' },
+  '暗い輪郭ピクセルは削らず、塗りの部分から縦横のシームを削除/複製して目標サイズに合わせます。切り取りの後・正方形化の前に適用します。': { en: 'Dark outline pixels are never removed; seams are deleted or duplicated in the fill areas to reach the target size. Applied after cropping and before squaring.', ko: '어두운 윤곽 픽셀은 지우지 않고, 채색부에서 가로·세로 시임을 삭제/복제하여 목표 크기에 맞춥니다. 자르기 후, 정사각형화 전에 적용됩니다.', zh: '不会删除深色轮廓像素,而是在填色部分删除/复制纵横缝线以达到目标尺寸。在裁切之后、正方形化之前应用。' },
+  'PNG保存': { en: 'Save PNG', ko: 'PNG 저장', zh: '保存PNG' },
+  'クリップボードへコピー': { en: 'Copy to clipboard', ko: '클립보드에 복사', zh: '复制到剪贴板' },
+  '元画像': { en: 'Source', ko: '원본 이미지', zh: '原图' },
+  '結果(1ドット=1px)': { en: 'Result (1 dot = 1 px)', ko: '결과(1도트=1px)', zh: '结果(1点=1px)' },
+  '表示倍率': { en: 'Zoom', ko: '표시 배율', zh: '显示倍率' },
+  '自動': { en: 'Auto', ko: '자동', zh: '自动' },
+  '画像を開く / Ctrl+V で貼り付け': { en: 'Open an image / paste with Ctrl+V', ko: '이미지 열기 / Ctrl+V로 붙여넣기', zh: '打开图片 / Ctrl+V 粘贴' },
+  'またはここにドロップ': { en: 'or drop it here', ko: '또는 여기에 드롭', zh: '或拖放到此处' },
+  'ドット幅 (px)': { en: 'Dot width (px)', ko: '도트 너비 (px)', zh: '点宽度 (px)' },
+  'ドット高さ (px)': { en: 'Dot height (px)', ko: '도트 높이 (px)', zh: '点高度 (px)' },
+  '横オフセット (px)': { en: 'Horizontal offset (px)', ko: '가로 오프셋 (px)', zh: '水平偏移 (px)' },
+  '縦オフセット (px)': { en: 'Vertical offset (px)', ko: '세로 오프셋 (px)', zh: '垂直偏移 (px)' },
+  '歪み許容量 (グリッド幅の%)': { en: 'Warp tolerance (% of grid size)', ko: '왜곡 허용량 (그리드 크기의 %)', zh: '扭曲容许量 (网格宽度的%)' },
+  '背景色の許容量(各色の差)': { en: 'Background color tolerance (per-channel diff)', ko: '배경색 허용량(각 색 차이)', zh: '背景色容差(各通道差)' },
+  '中心寄り': { en: 'Center bias', ko: '중심 쏠림', zh: '偏向中心' },
+  '多数決': { en: 'Majority', ko: '다수결', zh: '多数决' },
+  '画像を読み込めませんでした': { en: 'Could not load the image', ko: '이미지를 불러올 수 없습니다', zh: '无法载入图片' },
+  'クリップボードに画像がありません': { en: 'No image in the clipboard', ko: '클립보드에 이미지가 없습니다', zh: '剪贴板中没有图片' },
+  '貼り付けできませんでした。Ctrl+V をお試しください。': { en: 'Could not paste. Try Ctrl+V.', ko: '붙여넣을 수 없습니다. Ctrl+V를 사용해 보세요.', zh: '无法粘贴,请尝试 Ctrl+V。' },
+  'コピーできませんでした': { en: 'Could not copy', ko: '복사할 수 없습니다', zh: '无法复制' },
+  '検出: 平均 {0}×{1}px(不均一){2}': { en: 'Detected: avg {0}×{1}px (uneven){2}', ko: '감지: 평균 {0}×{1}px(불균일){2}', zh: '检测:平均 {0}×{1}px(不均匀){2}' },
+  ' 輪郭1px': { en: ' 1px outline', ko: ' 윤곽 1px', zh: ' 轮廓1px' },
+  '検出: {0}×{1}px  信頼度 X {2} / Y {3}': { en: 'Detected: {0}×{1}px  confidence X {2} / Y {3}', ko: '감지: {0}×{1}px  신뢰도 X {2} / Y {3}', zh: '检测:{0}×{1}px  置信度 X {2} / Y {3}' },
+  '背景: すでに透過': { en: 'Background: already transparent', ko: '배경: 이미 투명', zh: '背景:已透明' },
+  '背景: 外周がべた塗りではないため透過せず': { en: 'Background: border is not a solid color, left as is', ko: '배경: 외곽이 단색이 아니어서 투명 처리 안 함', zh: '背景:外围不是纯色,未做透明处理' },
+  '背景: rgb({0}) を透過 ({1}px)': { en: 'Background: rgb({0}) made transparent ({1}px)', ko: '배경: rgb({0}) 투명 처리 ({1}px)', zh: '背景:rgb({0}) 已透明化 ({1}px)' },
+  '出力: {0}×{1} px': { en: 'Output: {0}×{1} px', ko: '출력: {0}×{1} px', zh: '输出:{0}×{1} px' },
+  '(リサイズ前 {0}×{1})': { en: ' (before resize {0}×{1})', ko: ' (리사이즈 전 {0}×{1})', zh: ' (调整前 {0}×{1})' },
+};
+const LANG = (() => {
+  let l = null;
+  try { l = localStorage.getItem('topixel.lang'); } catch (e) {}
+  if (!l) {
+    const n = (navigator.languages && navigator.languages[0] || navigator.language || 'en').toLowerCase();
+    l = n.startsWith('ja') ? 'ja' : n.startsWith('ko') ? 'ko' : n.startsWith('zh') ? 'zh' : 'en';
+  }
+  return ['ja', 'en', 'ko', 'zh'].includes(l) ? l : 'en';
+})();
+function t(k, ...a) {
+  const s = LANG === 'ja' ? k : (T[k] && T[k][LANG]) || k;
+  return s.replace(/\{(\d)\}/g, (m, i) => a[i]);
+}
+document.documentElement.lang = LANG;
+document.title = t(document.title);
+$('lang').value = LANG;
+$('lang').addEventListener('change', () => {
+  try { localStorage.setItem('topixel.lang', $('lang').value); } catch (e) {}
+  location.reload();
+});
+if (LANG !== 'ja') {
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  const nodes = []; while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const n of nodes) {
+    if (n.parentElement.closest('script,style')) continue;
+    const key = n.nodeValue.trim().replace(/\s+/g, ' ');
+    if (T[key]) n.nodeValue = n.nodeValue.replace(n.nodeValue.trim(), T[key][LANG]);
+  }
+}
+
+// collapsible sections: every <h2> in the sidebar becomes a <details> holding the controls that follow it
+(() => {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem('topixel.sections') || '{}'); } catch (e) {}
+  for (const h of [...document.querySelectorAll('aside h2')]) {
+    const det = document.createElement('details'), sum = document.createElement('summary');
+    det.className = 'sec'; det.open = saved[h.textContent] !== false;
+    sum.textContent = h.textContent; det.appendChild(sum);
+    let n = h.nextElementSibling;
+    while (n && n.tagName !== 'H2' && !n.hasAttribute('data-keep')) { const nx = n.nextElementSibling; det.appendChild(n); n = nx; }
+    h.replaceWith(det);
+    det.addEventListener('toggle', () => {
+      saved[sum.textContent] = det.open;
+      try { localStorage.setItem('topixel.sections', JSON.stringify(saved)); } catch (e) {}
+    });
+  }
+})();
 const srcC = $('src'), ovC = $('ov'), outC = $('out');
 let img = null;          // {w,h,data(Uint8ClampedArray)}
-const P = { pw: 8, ph: 8, ox: 0, oy: 0, warp: 50, center: 50, major: 80 };
+const P = { pw: 8, ph: 8, ox: 0, oy: 0, warp: 50, center: 50, major: 80, tol: 12 };
 const ctls = {};
 
 // ---------- UI helpers ----------
@@ -134,13 +255,14 @@ function makeCtl(parent, key, label, min, max, step, onChange) {
 }
 function setP(key, v) { ctls[key].set(v, false); }
 
-makeCtl($('gridCtl'), 'pw', 'ドット幅 (px)', 1, 128, 0.01, userGrid);
-makeCtl($('gridCtl'), 'ph', 'ドット高さ (px)', 1, 128, 0.01, userGrid);
-makeCtl($('gridCtl'), 'ox', '横オフセット (px)', 0, 128, 0.01, userGrid);
-makeCtl($('gridCtl'), 'oy', '縦オフセット (px)', 0, 128, 0.01, userGrid);
-makeCtl($('gridCtl'), 'warp', '歪み許容量 (グリッド幅の%)', 0, 50, 1, warpChanged);
-makeCtl($('colorCtl'), 'center', '中心寄り', 0, 100, 1, schedule);
-makeCtl($('colorCtl'), 'major', '多数決', 0, 100, 1, schedule);
+makeCtl($('gridCtl'), 'pw', t('ドット幅 (px)'), 1, 128, 0.01, userGrid);
+makeCtl($('gridCtl'), 'ph', t('ドット高さ (px)'), 1, 128, 0.01, userGrid);
+makeCtl($('gridCtl'), 'ox', t('横オフセット (px)'), 0, 128, 0.01, userGrid);
+makeCtl($('gridCtl'), 'oy', t('縦オフセット (px)'), 0, 128, 0.01, userGrid);
+makeCtl($('gridCtl'), 'warp', t('歪み許容量 (グリッド幅の%)'), 0, 50, 1, warpChanged);
+makeCtl($('bgCtl'), 'tol', t('背景色の許容量(各色の差)'), 0, 100, 1, schedule);
+makeCtl($('colorCtl'), 'center', t('中心寄り'), 0, 100, 1, schedule);
+makeCtl($('colorCtl'), 'major', t('多数決'), 0, 100, 1, schedule);
 
 function warpChanged() { if (grid) { applyWarp(); schedule(); } }
 let grid = null;         // {x:[...], y:[...]} cell boundaries when following an uneven grid
@@ -187,7 +309,7 @@ function loadBlob(blob) {
     $('srcInfo').textContent = `${img.w}×${img.h}`;
     autoDetect();
   };
-  im.onerror = () => { URL.revokeObjectURL(url); alert('画像を読み込めませんでした'); };
+  im.onerror = () => { URL.revokeObjectURL(url); alert(t('画像を読み込めませんでした')); };
   im.src = url;
 }
 $('btnOpen').onclick = () => $('file').click();
@@ -199,8 +321,8 @@ $('btnPaste').onclick = async () => {
       const t = it.types.find(t => t.startsWith('image/'));
       if (t) { loadBlob(await it.getType(t)); return; }
     }
-    alert('クリップボードに画像がありません');
-  } catch (e) { alert('貼り付けできませんでした。Ctrl+V をお試しください。'); }
+    alert(t('クリップボードに画像がありません'));
+  } catch (e) { alert(t('貼り付けできませんでした。Ctrl+V をお試しください。')); }
 };
 document.addEventListener('paste', e => {
   for (const it of e.clipboardData.items) if (it.type.startsWith('image/')) { loadBlob(it.getAsFile()); e.preventDefault(); return; }
@@ -441,7 +563,7 @@ function autoDetect(force) {
       const pw = avg(grid.x), ph = avg(grid.y);
       setP('pw', r2(pw)); setP('ph', r2(ph)); syncMax();
       setP('ox', r2(grid.x[0] % pw)); setP('oy', r2(grid.y[0] % ph));
-      $('info').dataset.det = `検出: 平均 ${r2(pw)}×${r2(ph)}px(不均一)${outlineW > 1 ? ' 輪郭1px' : ''}`;
+      $('info').dataset.det = t('検出: 平均 {0}×{1}px(不均一){2}', r2(pw), r2(ph), outlineW > 1 ? t(' 輪郭1px') : '');
       schedule();
       return;
     }
@@ -462,7 +584,7 @@ function autoDetect(force) {
   setP('pw', r2(pw)); setP('ph', r2(ph));
   gridChanged();
   setP('ox', r2(bx.off)); setP('oy', r2(by.off));
-  $('info').dataset.det = `検出: ${r2(pw)}×${r2(ph)}px  信頼度 X ${bx.score.toFixed(1)} / Y ${by.score.toFixed(1)}`;
+  $('info').dataset.det = t('検出: {0}×{1}px  信頼度 X {2} / Y {3}', r2(pw), r2(ph), bx.score.toFixed(1), by.score.toFixed(1));
   schedule();
 }
 $('btnAuto').onclick = autoDetect;
@@ -611,6 +733,44 @@ function resizeAxis(d, w, h, tw, thr) {
   }
   return { d: out, w: tw };
 }
+// make a solid background transparent; returns a status message
+function applyBg(d, W, H) {
+  if (!$('transBg').checked) return '';
+  const tol = P.tol, border = [];
+  for (let x = 0; x < W; x++) { border.push(x, (H - 1) * W + x); }
+  for (let y = 1; y < H - 1; y++) { border.push(y * W, y * W + W - 1); }
+  const bucket = new Map();
+  let transCount = 0;
+  for (const p of border) {
+    const i = p * 4;
+    if (d[i + 3] < 128) { transCount++; continue; }
+    const key = (d[i] >> 4) << 8 | (d[i + 1] >> 4) << 4 | (d[i + 2] >> 4);
+    const b = bucket.get(key) || { n: 0, r: 0, g: 0, b: 0 };
+    b.n++; b.r += d[i]; b.g += d[i + 1]; b.b += d[i + 2];
+    bucket.set(key, b);
+  }
+  let top = null;
+  for (const b of bucket.values()) if (!top || b.n > top.n) top = b;
+  if (!top) return transCount ? t('背景: すでに透過') : '';
+  const bg = [top.r / top.n, top.g / top.n, top.b / top.n];
+  const match = p => {
+    const i = p * 4;
+    return d[i + 3] < 128 || Math.max(Math.abs(d[i] - bg[0]), Math.abs(d[i + 1] - bg[1]), Math.abs(d[i + 2] - bg[2])) <= tol;
+  };
+  let ok = 0; for (const p of border) if (match(p)) ok++;
+  if (ok < border.length * 0.85) return t('背景: 外周がべた塗りではないため透過せず');
+  const seen = new Uint8Array(W * H), stack = [];
+  for (const p of border) if (match(p) && !seen[p]) { seen[p] = 1; stack.push(p); }
+  while (stack.length) {
+    const p = stack.pop(), x = p % W, y = (p / W) | 0;
+    for (const q of [x > 0 ? p - 1 : -1, x < W - 1 ? p + 1 : -1, y > 0 ? p - W : -1, y < H - 1 ? p + W : -1])
+      if (q >= 0 && !seen[q] && match(q)) { seen[q] = 1; stack.push(q); }
+  }
+  if ($('islandTrans').checked) for (let p = 0; p < W * H; p++) if (!seen[p] && match(p)) seen[p] = 1;
+  let n = 0;
+  for (let p = 0; p < W * H; p++) if (seen[p]) { d[p * 4 + 3] = 0; n++; }
+  return t('背景: rgb({0}) を透過 ({1}px)', bg.map(Math.round), n);
+}
 // crop the margin to the smallest rectangle and/or pad to a square
 function postProcess(data, W, H) {
   let x0 = 0, y0 = 0, x1 = W, y1 = H;
@@ -653,6 +813,8 @@ function postProcess(data, W, H) {
   return { data: res, w, h };
 }
 $('crop').addEventListener('change', schedule);
+$('transBg').addEventListener('change', schedule);
+$('islandTrans').addEventListener('change', schedule);
 $('resizeOn').addEventListener('change', () => {
   if ($('resizeOn').checked && preSize.w) { if (!+$('rw').value) $('rw').value = preSize.w; if (!+$('rh').value) $('rh').value = preSize.h; }
   schedule();
@@ -668,21 +830,22 @@ function rebuild() {
   if (!W || !H) return;
   const g = outC.getContext('2d');
   const out = g.createImageData(W, H);
-  const t = P.center / 100, m = P.major / 100;
+  const tc = P.center / 100, m = P.major / 100;
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
     let c;
     if (grid) {
       const x0 = grid.wx[x][y], x1 = Math.max(x0 + 1, grid.wx[x + 1][y]), y0 = grid.wy[y][x], y1 = Math.max(y0 + 1, grid.wy[y + 1][x]);
-      c = cellColor(x0, y0, x1, y1, t, m);
-    } else c = cellColor(xs[x][0], ys[y][0], xs[x][1], ys[y][1], t, m);
+      c = cellColor(x0, y0, x1, y1, tc, m);
+    } else c = cellColor(xs[x][0], ys[y][0], xs[x][1], ys[y][1], tc, m);
     out.data.set(c, (y * W + x) * 4);
   }
+  const bgMsg = applyBg(out.data, W, H);
   const fin = postProcess(out.data, W, H);
   outC.width = fin.w; outC.height = fin.h;
   g.putImageData(new ImageData(fin.data, fin.w, fin.h), 0, 0);
   $('outInfo').textContent = `${fin.w}×${fin.h} px`;
   $('btnSave').disabled = $('btnCopy').disabled = false;
-  $('info').textContent = `${$('info').dataset.det || ''}\n出力: ${fin.w}×${fin.h} px${$('resizeOn').checked ? `(リサイズ前 ${preSize.w}×${preSize.h})` : ''}`;
+  $('info').textContent = `${$('info').dataset.det || ''}${bgMsg ? '\n' + bgMsg : ''}\n${t('出力: {0}×{1} px', fin.w, fin.h)}${$('resizeOn').checked ? t('(リサイズ前 {0}×{1})', preSize.w, preSize.h) : ''}`;
   layoutOut();
   drawOverlay();
 }
@@ -742,7 +905,7 @@ $('btnSave').onclick = () => {
 $('btnCopy').onclick = () => {
   outC.toBlob(async b => {
     try { await navigator.clipboard.write([new ClipboardItem({ 'image/png': b })]); }
-    catch (e) { alert('コピーできませんでした'); }
+    catch (e) { alert(t('コピーできませんでした')); }
   }, 'image/png');
 };
 
