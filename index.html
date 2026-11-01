@@ -228,7 +228,7 @@ if (LANG !== 'ja') {
   try { saved = JSON.parse(localStorage.getItem('topixel.sections') || '{}'); } catch (e) {}
   for (const h of [...document.querySelectorAll('aside h2')]) {
     const det = document.createElement('details'), sum = document.createElement('summary');
-    det.className = 'sec'; det.open = saved[h.textContent] !== false;
+    det.className = 'sec'; det.open = saved[h.textContent] === true;
     sum.textContent = h.textContent; det.appendChild(sum);
     let n = h.nextElementSibling;
     while (n && n.tagName !== 'H2' && !n.hasAttribute('data-keep')) { const nx = n.nextElementSibling; det.appendChild(n); n = nx; }
