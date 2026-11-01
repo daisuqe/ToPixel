@@ -3,6 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png">
+<link rel="shortcut icon" href="icons/favicon.ico">
+<link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="apple-mobile-web-app-title" content="ToPixel">
 <title>ToPixel - ドット絵を1ドット1ピクセルに</title>
 <style>
   :root {
@@ -15,6 +21,17 @@
   main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   h1 { font-size: 17px; margin: 0 0 4px; }
   .sub { color: var(--dim); font-size: 12px; margin-bottom: 12px; }
+  #appsRow { display: flex; justify-content: flex-start; margin-top: 14px; padding: 0 0 4px 4px; }
+  #appsBtn { background: none; border: 0; padding: 0; margin: 0; cursor: pointer; opacity: .7; line-height: 0; border-radius: 3px; }
+  #appsBtn:hover { opacity: 1; }
+  #appsBtn:focus-visible { outline: 2px solid #fff; outline-offset: 3px; opacity: 1; }
+  #appsBtn canvas { width: 32px; height: 32px; image-rendering: pixelated; display: block; }
+  #appDlg { position: fixed; inset: 0; z-index: 10000; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; padding: 16px; }
+  #appDlg .panel { width: min(380px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; color: var(--fg); text-align: center; padding: 20px 16px; }
+  #appDlg .msg { white-space: pre-line; margin: 0 0 16px; }
+  #appDlg .btns { display: flex; gap: 12px; justify-content: center; }
+  #appDlg .btns button { box-sizing: border-box; width: 110px; height: 36px; padding: 0; }
+  #appDlg .btns button:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
   details.sec { margin: 12px 0 0; }
   details.sec > summary { list-style: none; cursor: pointer; font-size: 13px; color: var(--acc); border-bottom: 1px solid var(--line); padding: 3px 0; margin-bottom: 6px; user-select: none; }
   details.sec > summary::-webkit-details-marker { display: none; }
@@ -104,6 +121,7 @@
       <option value="ja">Japanese</option><option value="en">English</option><option value="ko">Korean</option><option value="zh">Chinese</option>
     </select>
   </div>
+  <div id="appsRow"></div>
 </aside>
 
 <main>
@@ -182,6 +200,7 @@ const T = {
   '画像を読み込めませんでした': { en: 'Could not load the image', ko: '이미지를 불러올 수 없습니다', zh: '无法载入图片' },
   'クリップボードに画像がありません': { en: 'No image in the clipboard', ko: '클립보드에 이미지가 없습니다', zh: '剪贴板中没有图片' },
   '貼り付けできませんでした。Ctrl+V をお試しください。': { en: 'Could not paste. Try Ctrl+V.', ko: '붙여넣을 수 없습니다. Ctrl+V를 사용해 보세요.', zh: '无法粘贴,请尝试 Ctrl+V。' },
+  'アプリ一覧に移動します。\nこのアプリを離れますがよろしいですか？': { en: 'This will take you to the app list.\nDo you want to leave this app?', ko: '앱 목록으로 이동합니다.\n이 앱을 떠나시겠습니까?', zh: '即将前往应用列表。\n确定要离开此应用吗?' },
   'コピーできませんでした': { en: 'Could not copy', ko: '복사할 수 없습니다', zh: '无法复制' },
   '検出: 平均 {0}×{1}px(不均一){2}': { en: 'Detected: avg {0}×{1}px (uneven){2}', ko: '감지: 평균 {0}×{1}px(불균일){2}', zh: '检测:平均 {0}×{1}px(不均匀){2}' },
   ' 輪郭1px': { en: ' 1px outline', ko: ' 윤곽 1px', zh: ' 轮廓1px' },
@@ -294,7 +313,7 @@ $('zoom').addEventListener('change', layoutOut);
 
 // ---------- image loading ----------
 function loadBlob(blob) {
-  if (!blob) return;
+  if (!blob || $('appDlg')) return;
   const url = URL.createObjectURL(blob);
   const im = new Image();
   im.onload = () => {
@@ -328,6 +347,7 @@ $('btnPaste').onclick = async () => {
   } catch (e) { alert(t('貼り付けできませんでした。Ctrl+V をお試しください。')); }
 };
 document.addEventListener('paste', e => {
+  if ($('appDlg')) return;
   for (const it of e.clipboardData.items) if (it.type.startsWith('image/')) { loadBlob(it.getAsFile()); e.preventDefault(); return; }
 });
 for (const ev of ['dragenter', 'dragover']) document.addEventListener(ev, e => { e.preventDefault(); document.body.classList.add('drag'); });
@@ -911,6 +931,64 @@ $('btnCopy').onclick = () => {
     catch (e) { alert(t('コピーできませんでした')); }
   }, 'image/png');
 };
+
+// ---------- app list button + confirm dialog ----------
+const APPS_ICON = [
+  '......###...###.',
+  '.....#...#.#...#',
+  '.....#...#.#...#',
+  '.....#..#..#..#.',
+  '.....#..#..#..#.',
+  '....##..####..#.',
+  '..##.......#..#.',
+  '.#............#.',
+  '#.............#.',
+  '#..............#',
+  '############...#',
+  '............#..#',
+  '.###########...#',
+  '.#............#.',
+  '..##........##..',
+  '....########....'
+];
+(() => {
+  const btn = document.createElement('button'), cv = document.createElement('canvas');
+  btn.id = 'appsBtn'; btn.type = 'button'; btn.setAttribute('aria-label', 'App list');
+  cv.width = cv.height = 16;
+  const g = cv.getContext('2d');
+  g.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--dim').trim() || '#9aa0ae';
+  APPS_ICON.forEach((row, y) => { for (let x = 0; x < row.length; x++) if (row[x] === '#') g.fillRect(x, y, 1, 1); });
+  btn.appendChild(cv);
+  $('appsRow').appendChild(btn);
+
+  function close() {
+    const d = $('appDlg'); if (!d) return;
+    d.remove(); document.removeEventListener('keydown', onKey, true);
+    btn.focus();
+  }
+  function onKey(e) {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); return; }
+    const yes = $('appYes'), no = $('appNo');
+    if (e.key === 'Tab' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      (document.activeElement === no ? yes : no).focus();
+    }
+    e.stopPropagation();   // nothing else reacts to keys while the dialog is open
+  }
+  function open() {
+    const d = document.createElement('div'); d.id = 'appDlg';
+    d.setAttribute('role', 'dialog'); d.setAttribute('aria-modal', 'true');
+    d.innerHTML = '<div class="panel"><p class="msg"></p><div class="btns"><button type="button" id="appYes">Yes</button><button type="button" id="appNo" class="primary">No</button></div></div>';
+    d.querySelector('.msg').textContent = t('アプリ一覧に移動します。\nこのアプリを離れますがよろしいですか？');
+    d.addEventListener('mousedown', e => { if (e.target === d) close(); });
+    d.querySelector('#appYes').onclick = () => { location.href = 'https://daisuqe.github.io/'; };
+    d.querySelector('#appNo').onclick = close;
+    document.body.appendChild(d);
+    document.addEventListener('keydown', onKey, true);
+    $('appNo').focus();
+  }
+  btn.addEventListener('click', open);
+})();
 
 // expose for debugging
 window.ToPixel = { loadBlob, P, autoDetect, edgeProfile, estimatePitch, dpBounds, fitBounds };
