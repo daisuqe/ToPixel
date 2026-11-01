@@ -888,15 +888,21 @@ window.addEventListener('resize', () => { layoutOut(); drawOverlay(); });
 
 function drawOverlay() {
   if (!img) return;
-  const disp = srcC.getBoundingClientRect();
-  // overlay is drawn at source resolution; CSS scales both canvases identically
-  ovC.width = img.w; ovC.height = img.h;
-  const g = ovC.getContext('2d');
-  g.clearRect(0, 0, img.w, img.h);
   srcC.style.width = ovC.style.width = '';
+  // small source shown enlarged to 4x or more: keep the dots crisp instead of smoothing them
+  const zoom = srcC.getBoundingClientRect().width / img.w;
+  const big = zoom >= 4;
+  srcC.style.imageRendering = big ? 'pixelated' : '';
+  // overlay is drawn at source resolution (CSS scales both canvases identically);
+  // when enlarged it gets display resolution so the grid lines stay thin and sharp
+  const k = big ? zoom * (window.devicePixelRatio || 1) : 1;
+  ovC.width = Math.round(img.w * k); ovC.height = Math.round(img.h * k);
+  const g = ovC.getContext('2d');
+  g.setTransform(ovC.width / img.w, 0, 0, ovC.height / img.h, 0, 0);
+  g.clearRect(0, 0, img.w, img.h);
   if (!$('showGrid').checked) return;
   const pw = Math.max(1, P.pw), ph = Math.max(1, P.ph);
-  const lw = Math.max(1, Math.round(Math.min(img.w, img.h) / 600));
+  const lw = big ? 1 / k : Math.max(1, Math.round(Math.min(img.w, img.h) / 600));
   g.lineWidth = lw; g.strokeStyle = 'rgba(255,0,128,.75)';
   g.beginPath();
   const vx = grid ? grid.x : null, vy = grid ? grid.y : null;
