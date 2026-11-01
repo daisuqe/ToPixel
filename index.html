@@ -81,6 +81,9 @@
   <label class="chk"><input type="checkbox" id="crop">周囲の余白を切り取る(最小の長方形)</label>
   <label class="chk"><input type="checkbox" id="makeSquare">短辺を長辺に合わせて正方形にする</label>
   <div class="hint">余白は透明部分(透明が無ければ左上の色)を基準に判定します</div>
+  <label class="chk"><input type="checkbox" id="resizeOn">強制リサイズ(輪郭を保って塗りを伸縮)</label>
+  <div class="ctl"><div class="inp">幅 <input type="number" id="rw" min="1" max="2048"> 高さ <input type="number" id="rh" min="1" max="2048"></div></div>
+  <div class="hint" id="rInfo">暗い輪郭ピクセルは削らず、塗りの部分から縦横のシームを削除/複製して目標サイズに合わせます。切り取りの後・正方形化の前に適用します。</div>
   <div class="row">
     <button id="btnSave" disabled>PNG保存</button>
     <button id="btnCopy" disabled>クリップボードへコピー</button>
@@ -114,7 +117,7 @@
 const $ = id => document.getElementById(id);
 const srcC = $('src'), ovC = $('ov'), outC = $('out');
 let img = null;          // {w,h,data(Uint8ClampedArray)}
-const P = { pw: 8, ph: 8, ox: 0, oy: 0, warp: 50, center: 30, major: 50 };
+const P = { pw: 8, ph: 8, ox: 0, oy: 0, warp: 50, center: 50, major: 80 };
 const ctls = {};
 
 // ---------- UI helpers ----------
@@ -534,6 +537,80 @@ function cellRange(off, p, len) {
   }
   return cells;
 }
+// ---------- forced resize (seam removal / duplication that spares outline pixels) ----------
+let preSize = { w: 0, h: 0 };
+const lumAt = (d, i) => d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+function darkThreshold(d) {
+  const hist = new Uint32Array(256); let n = 0;
+  for (let i = 0; i < d.length; i += 4) if (d[i + 3] >= 128) { hist[lumAt(d, i) | 0]++; n++; }
+  let acc = 0, p5 = 0;
+  for (; p5 < 255; p5++) { acc += hist[p5]; if (acc >= n * 0.05) break; }
+  return Math.min(p5 + 30, 100);
+}
+function transpose(d, w, h) {
+  const o = new Uint8ClampedArray(d.length);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) o.set(d.subarray((y * w + x) * 4, (y * w + x) * 4 + 4), (x * h + y) * 4);
+  return o;
+}
+function pixDist(d, i, j) {
+  if (d[i + 3] < 128 && d[j + 3] < 128) return 0;
+  return Math.abs(d[i] - d[j]) + Math.abs(d[i + 1] - d[j + 1]) + Math.abs(d[i + 2] - d[j + 2]) + Math.abs(d[i + 3] - d[j + 3]);
+}
+// cheapest top-to-bottom path (one pixel per row, moving at most one column) to delete
+function seamPath(d, w, h, thr) {
+  const m = new Float64Array(w * h), from = new Int8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    let c;
+    if (d[i + 3] < 128) c = 150;
+    else {
+      c = pixDist(d, x > 0 ? i - 4 : i, x < w - 1 ? i + 4 : i);
+      if (lumAt(d, i) <= thr) c += 4000;     // outline pixels are protected
+    }
+    if (y === 0) { m[x] = c; continue; }
+    let best = m[(y - 1) * w + x], f = 0;
+    if (x > 0 && m[(y - 1) * w + x - 1] + 20 < best) { best = m[(y - 1) * w + x - 1] + 20; f = -1; }
+    if (x < w - 1 && m[(y - 1) * w + x + 1] + 20 < best) { best = m[(y - 1) * w + x + 1] + 20; f = 1; }
+    m[y * w + x] = c + best; from[y * w + x] = f;
+  }
+  const path = new Int32Array(h);
+  let x = 0;
+  for (let k = 1; k < w; k++) if (m[(h - 1) * w + k] < m[(h - 1) * w + x]) x = k;
+  for (let y = h - 1; y >= 0; y--) { path[y] = x; x += from[y * w + x]; }
+  return path;
+}
+// change the width to tw: shrink by deleting seams, grow by duplicating seams
+function resizeAxis(d, w, h, tw, thr) {
+  if (tw === w) return { d, w };
+  const k = Math.abs(tw - w);
+  let cur = d, cw = w;
+  const colMap = new Int32Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) colMap[y * w + x] = x;
+  let map = colMap;
+  const seams = [];
+  for (let n = 0; n < k && cw > 1; n++) {
+    const p = seamPath(cur, cw, h, thr);
+    const nd = new Uint8ClampedArray((cw - 1) * h * 4), nm = new Int32Array((cw - 1) * h);
+    const seam = new Int32Array(h);
+    for (let y = 0; y < h; y++) {
+      const x0 = p[y]; seam[y] = map[y * cw + x0];
+      nd.set(cur.subarray(y * cw * 4, (y * cw + x0) * 4), y * (cw - 1) * 4);
+      nd.set(cur.subarray((y * cw + x0 + 1) * 4, (y + 1) * cw * 4), (y * (cw - 1) + x0) * 4);
+      nm.set(map.subarray(y * cw, y * cw + x0), y * (cw - 1));
+      nm.set(map.subarray(y * cw + x0 + 1, (y + 1) * cw), y * (cw - 1) + x0);
+    }
+    seams.push(seam); cur = nd; map = nm; cw--;
+  }
+  if (tw < w) return { d: cur, w: cw };
+  const dup = new Uint8Array(w * h);
+  for (const sm of seams) for (let y = 0; y < h; y++) dup[y * w + sm[y]]++;
+  const out = new Uint8ClampedArray(tw * h * 4);
+  for (let y = 0; y < h; y++) {
+    let o = y * tw;
+    for (let x = 0; x < w; x++) for (let r = 0; r <= dup[y * w + x]; r++) out.set(d.subarray((y * w + x) * 4, (y * w + x) * 4 + 4), (o++) * 4);
+  }
+  return { d: out, w: tw };
+}
 // crop the margin to the smallest rectangle and/or pad to a square
 function postProcess(data, W, H) {
   let x0 = 0, y0 = 0, x1 = W, y1 = H;
@@ -551,19 +628,37 @@ function postProcess(data, W, H) {
     }
     if (x1 <= x0) { x0 = 0; y0 = 0; x1 = W; y1 = H; }
   }
-  const cw = x1 - x0, ch = y1 - y0;
+  let cw = x1 - x0, ch = y1 - y0;
+  let cd = new Uint8ClampedArray(cw * ch * 4);
+  for (let y = 0; y < ch; y++) {
+    const a = ((y0 + y) * W + x0) * 4;
+    cd.set(data.subarray(a, a + cw * 4), y * cw * 4);
+  }
+  preSize = { w: cw, h: ch };
+  if ($('resizeOn').checked) {
+    const tw = Math.max(1, Math.min(2048, +$('rw').value | 0)) || cw, th = Math.max(1, Math.min(2048, +$('rh').value | 0)) || ch;
+    if (tw !== cw || th !== ch) {
+      const thr = darkThreshold(cd);
+      const r = resizeAxis(cd, cw, ch, tw, thr);                       // width -> tw
+      const t = resizeAxis(transpose(r.d, r.w, ch), ch, r.w, th, thr);  // height -> th (on the transposed image)
+      cd = transpose(t.d, th, r.w); cw = r.w; ch = th;
+    }
+  }
   const S = doSq ? Math.max(cw, ch) : 0;
   const w = doSq ? S : cw, h = doSq ? S : ch;
   const res = new Uint8ClampedArray(w * h * 4);
   if (bg) for (let i = 0; i < res.length; i += 4) res.set(bg, i);
   const ox = (w - cw) >> 1, oy = (h - ch) >> 1;
-  for (let y = 0; y < ch; y++) {
-    const a = ((y0 + y) * W + x0) * 4;
-    res.set(data.subarray(a, a + cw * 4), ((y + oy) * w + ox) * 4);
-  }
+  for (let y = 0; y < ch; y++) res.set(cd.subarray(y * cw * 4, (y + 1) * cw * 4), ((y + oy) * w + ox) * 4);
   return { data: res, w, h };
 }
 $('crop').addEventListener('change', schedule);
+$('resizeOn').addEventListener('change', () => {
+  if ($('resizeOn').checked && preSize.w) { if (!+$('rw').value) $('rw').value = preSize.w; if (!+$('rh').value) $('rh').value = preSize.h; }
+  schedule();
+});
+$('rw').addEventListener('input', schedule);
+$('rh').addEventListener('input', schedule);
 $('makeSquare').addEventListener('change', schedule);
 function rebuild() {
   if (!img) return;
@@ -587,7 +682,7 @@ function rebuild() {
   g.putImageData(new ImageData(fin.data, fin.w, fin.h), 0, 0);
   $('outInfo').textContent = `${fin.w}×${fin.h} px`;
   $('btnSave').disabled = $('btnCopy').disabled = false;
-  $('info').textContent = `${$('info').dataset.det || ''}\n出力: ${fin.w}×${fin.h} px`;
+  $('info').textContent = `${$('info').dataset.det || ''}\n出力: ${fin.w}×${fin.h} px${$('resizeOn').checked ? `(リサイズ前 ${preSize.w}×${preSize.h})` : ''}`;
   layoutOut();
   drawOverlay();
 }
