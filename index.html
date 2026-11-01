@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ToPixel - ドット絵を1ドット1ピクセルに</title>
+<style>
+  :root {
+    --bg: #1b1d22; --panel: #252830; --line: #3a3e49; --fg: #e6e8ee; --dim: #9aa0ae; --acc: #4da3ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.5 "Segoe UI", "Yu Gothic UI", sans-serif; display: flex; }
+  aside { width: 320px; flex: none; background: var(--panel); border-right: 1px solid var(--line); padding: 14px; overflow-y: auto; }
+  main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  .sub { color: var(--dim); font-size: 12px; margin-bottom: 12px; }
+  h2 { font-size: 13px; color: var(--acc); margin: 16px 0 6px; border-bottom: 1px solid var(--line); padding-bottom: 3px; }
+  button, .btn { background: #323744; color: var(--fg); border: 1px solid var(--line); border-radius: 5px; padding: 6px 10px; cursor: pointer; font: inherit; }
+  button:hover, .btn:hover { background: #3d4352; }
+  button.primary { background: #1f5fa8; border-color: #2d78cc; }
+  button.primary:hover { background: #2670c4; }
+  button:disabled { opacity: .4; cursor: default; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+  .ctl { margin: 6px 0; }
+  .ctl label { display: flex; justify-content: space-between; color: var(--dim); font-size: 12px; }
+  .ctl .inp { display: flex; gap: 6px; align-items: center; }
+  .ctl input[type=range] { flex: 1; min-width: 0; }
+  .ctl input[type=number] { width: 70px; background: #181a1f; color: var(--fg); border: 1px solid var(--line); border-radius: 4px; padding: 2px 4px; }
+  .chk { display: flex; gap: 6px; align-items: center; margin: 4px 0; color: var(--fg); cursor: pointer; }
+  .hint { color: var(--dim); font-size: 11.5px; margin-top: 2px; }
+  #info { font-size: 12px; color: var(--dim); white-space: pre-line; margin-top: 8px; }
+  .views { flex: 1; min-height: 0; display: flex; gap: 1px; background: var(--line); }
+  .view { flex: 1; min-width: 0; background: var(--bg); display: flex; flex-direction: column; }
+  .view header { padding: 6px 10px; font-size: 12px; color: var(--dim); display: flex; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); }
+  .view header select { background: #181a1f; color: var(--fg); border: 1px solid var(--line); border-radius: 4px; }
+  .scroll { flex: 1; overflow: auto; padding: 12px; position: relative; }
+  .stack { position: relative; display: inline-block; line-height: 0; }
+  .stack canvas { display: block; }
+  .stack.fit { display: block; width: 100%; }
+  .stack.fit canvas { width: 100%; height: auto; }
+  .stack canvas.ov { position: absolute; left: 0; top: 0; pointer-events: none; }
+  #out { image-rendering: pixelated; background: repeating-conic-gradient(#555 0 25%, #777 0 50%) 0 0 / 16px 16px; }
+  #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; color: var(--dim); font-size: 15px; padding: 20px; pointer-events: none; }
+  body.drag main { outline: 3px dashed var(--acc); outline-offset: -6px; }
+  @media (max-width: 800px) { body { flex-direction: column; } aside { width: auto; max-height: 45vh; border-right: 0; border-bottom: 1px solid var(--line); } .views { flex-direction: column; } }
+</style>
+</head>
+<body>
+<aside>
+  <h1>ToPixel</h1>
+  <div class="sub">大きなドット絵を 1ドット=1ピクセル に戻す</div>
+
+  <div class="row">
+    <button class="primary" id="btnOpen">画像を開く</button>
+    <button id="btnPaste">貼り付け</button>
+    <input type="file" id="file" accept="image/*" hidden>
+  </div>
+  <div class="hint">Ctrl+V・ドラッグ&amp;ドロップでも読み込めます</div>
+
+  <h2>グリッド解析</h2>
+  <div class="row"><button id="btnAuto">自動解析</button></div>
+  <div class="ctl"><label><span>グリッド方式</span></label>
+    <select id="gridMode" style="width:100%;background:#181a1f;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px">
+      <option value="quad">不均一・四角形(線が曲がる)</option>
+      <option value="rect">不均一・長方形(直線)</option>
+      <option value="uniform">均一</option>
+    </select></div>
+  <div class="hint">AI生成画像のようにドット幅が揺れる場合は不均一。数値を手で変えると均一に切り替わります</div>
+  <label class="chk"><input type="checkbox" id="outline1">輪郭を1ピクセルに寄せる</label>
+  <div class="hint">読み込み時に自動判定します。ONだと暗い輪郭線の境目にグリッドを優先して合わせます</div>
+  <label class="chk"><input type="checkbox" id="square" checked>縦横を同じサイズにする(均一時)</label>
+  <div id="gridCtl"></div>
+  <label class="chk"><input type="checkbox" id="showGrid" checked>元画像にグリッドを重ねる</label>
+
+  <h2>色の取得</h2>
+  <div id="colorCtl"></div>
+  <div class="hint">中心寄り: 0=マス全体の平均 / 100=中心の1点<br>多数決: 0=無効 / 大きいほど、マス内で最も多い色の集まりに寄せる</div>
+
+  <h2>出力</h2>
+  <label class="chk"><input type="checkbox" id="crop">周囲の余白を切り取る(最小の長方形)</label>
+  <label class="chk"><input type="checkbox" id="makeSquare">短辺を長辺に合わせて正方形にする</label>
+  <div class="hint">余白は透明部分(透明が無ければ左上の色)を基準に判定します</div>
+  <div class="row">
+    <button id="btnSave" disabled>PNG保存</button>
+    <button id="btnCopy" disabled>クリップボードへコピー</button>
+  </div>
+  <div id="info"></div>
+</aside>
+
+<main>
+  <div class="views">
+    <section class="view">
+      <header><span>元画像</span><span id="srcInfo"></span></header>
+      <div class="scroll"><div class="stack fit"><canvas id="src"></canvas><canvas id="ov" class="ov"></canvas></div></div>
+    </section>
+    <section class="view">
+      <header><span>結果(1ドット=1px) <b id="outInfo"></b></span>
+        <label>表示倍率 <select id="zoom">
+          <option value="0">自動</option><option value="1">1x</option><option value="2">2x</option>
+          <option value="4">4x</option><option value="8">8x</option><option value="16">16x</option><option value="32">32x</option>
+        </select></label>
+      </header>
+      <div class="scroll" id="outScroll"><div class="stack"><canvas id="out"></canvas></div>
+        <div id="empty">画像を開く / Ctrl+V で貼り付け<br>またはここにドロップ</div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+(() => {
+'use strict';
+const $ = id => document.getElementById(id);
+const srcC = $('src'), ovC = $('ov'), outC = $('out');
+let img = null;          // {w,h,data(Uint8ClampedArray)}
+const P = { pw: 8, ph: 8, ox: 0, oy: 0, warp: 50, center: 30, major: 50 };
+const ctls = {};
+
+// ---------- UI helpers ----------
+function makeCtl(parent, key, label, min, max, step, onChange) {
+  const d = document.createElement('div'); d.className = 'ctl';
+  d.innerHTML = `<label><span>${label}</span></label><div class="inp"><input type="range"><input type="number"></div>`;
+  const [r, n] = d.querySelectorAll('input');
+  for (const e of [r, n]) { e.min = min; e.max = max; e.step = step; e.value = P[key]; }
+  const set = (v, fire) => { v = +v; if (isNaN(v)) return; P[key] = v; r.value = v; n.value = v; if (fire) onChange(key); };
+  r.addEventListener('input', () => set(r.value, true));
+  n.addEventListener('input', () => set(n.value, true));
+  parent.appendChild(d);
+  ctls[key] = { set, r, n };
+}
+function setP(key, v) { ctls[key].set(v, false); }
+
+makeCtl($('gridCtl'), 'pw', 'ドット幅 (px)', 1, 128, 0.01, userGrid);
+makeCtl($('gridCtl'), 'ph', 'ドット高さ (px)', 1, 128, 0.01, userGrid);
+makeCtl($('gridCtl'), 'ox', '横オフセット (px)', 0, 128, 0.01, userGrid);
+makeCtl($('gridCtl'), 'oy', '縦オフセット (px)', 0, 128, 0.01, userGrid);
+makeCtl($('gridCtl'), 'warp', '歪み許容量 (グリッド幅の%)', 0, 50, 1, warpChanged);
+makeCtl($('colorCtl'), 'center', '中心寄り', 0, 100, 1, schedule);
+makeCtl($('colorCtl'), 'major', '多数決', 0, 100, 1, schedule);
+
+function warpChanged() { if (grid) { applyWarp(); schedule(); } }
+let grid = null;         // {x:[...], y:[...]} cell boundaries when following an uneven grid
+function syncMax() {
+  for (const k of ['ox', 'oy']) {
+    const m = k === 'ox' ? P.pw : P.ph;
+    ctls[k].r.max = ctls[k].n.max = Math.max(m, 1);
+  }
+}
+function userGrid(key) { $('gridMode').value = 'uniform'; grid = null; gridChanged(key); }
+function gridChanged(key) {
+  if ($('square').checked) {
+    if (key === 'pw') setP('ph', P.pw);
+    if (key === 'ph') setP('pw', P.ph);
+  }
+  syncMax();
+  schedule();
+}
+$('gridMode').addEventListener('change', () => {
+  if (grid && $('gridMode').value !== 'uniform') { applyWarp(); schedule(); } else autoDetect('keep');
+});
+$('outline1').addEventListener('change', () => autoDetect('keep'));
+$('square').addEventListener('change', () => { if ($('square').checked) { setP('ph', P.pw); schedule(); } });
+$('showGrid').addEventListener('change', drawOverlay);
+$('zoom').addEventListener('change', layoutOut);
+
+// ---------- image loading ----------
+function loadBlob(blob) {
+  if (!blob) return;
+  const url = URL.createObjectURL(blob);
+  const im = new Image();
+  im.onload = () => {
+    const c = document.createElement('canvas');
+    c.width = im.naturalWidth; c.height = im.naturalHeight;
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.drawImage(im, 0, 0);
+    img = { w: c.width, h: c.height, data: g.getImageData(0, 0, c.width, c.height).data };
+    URL.revokeObjectURL(url);
+    srcC.width = ovC.width = 0; // reset
+    srcC.width = img.w; srcC.height = img.h;
+    srcC.getContext('2d').drawImage(im, 0, 0);
+    computeDark();
+    $('empty').style.display = 'none';
+    $('srcInfo').textContent = `${img.w}×${img.h}`;
+    autoDetect();
+  };
+  im.onerror = () => { URL.revokeObjectURL(url); alert('画像を読み込めませんでした'); };
+  im.src = url;
+}
+$('btnOpen').onclick = () => $('file').click();
+$('file').onchange = e => { loadBlob(e.target.files[0]); e.target.value = ''; };
+$('btnPaste').onclick = async () => {
+  try {
+    const items = await navigator.clipboard.read();
+    for (const it of items) {
+      const t = it.types.find(t => t.startsWith('image/'));
+      if (t) { loadBlob(await it.getType(t)); return; }
+    }
+    alert('クリップボードに画像がありません');
+  } catch (e) { alert('貼り付けできませんでした。Ctrl+V をお試しください。'); }
+};
+document.addEventListener('paste', e => {
+  for (const it of e.clipboardData.items) if (it.type.startsWith('image/')) { loadBlob(it.getAsFile()); e.preventDefault(); return; }
+});
+for (const ev of ['dragenter', 'dragover']) document.addEventListener(ev, e => { e.preventDefault(); document.body.classList.add('drag'); });
+for (const ev of ['dragleave', 'drop']) document.addEventListener(ev, e => { e.preventDefault(); document.body.classList.remove('drag'); });
+document.addEventListener('drop', e => { const f = [...e.dataTransfer.files].find(f => f.type.startsWith('image/')); if (f) loadBlob(f); });
+
+// ---------- grid detection ----------
+function edgeProfile(horizontal) {
+  const { w, h, data } = img;
+  const n = horizontal ? w : h, m = horizontal ? h : w;
+  const e = new Float64Array(n);
+  const step = Math.max(1, Math.floor(m / 600));
+  for (let a = 1; a < n; a++) {
+    let s = 0;
+    for (let b = 0; b < m; b += step) {
+      const i = horizontal ? (b * w + a) * 4 : (a * w + b) * 4;
+      const j = horizontal ? i - 4 : i - w * 4;
+      s += pd(i, j);
+    }
+    e[a] = s;
+  }
+  return e;
+}
+// grid lines at off + k*p ; returns [score, bestOffset]
+function bestOffset(e, mean, p, offStep) {
+  const n = e.length;
+  let best = -1, bo = 0;
+  for (let off = 0; off < p; off += offStep) {
+    let s = 0, c = 0;
+    for (let pos = off + (off < 1 ? p : 0); pos < n - 0.5; pos += p) { s += e[Math.round(pos)]; c++; }
+    if (c) { s = s / c / mean; if (s > best) { best = s; bo = off; } }
+  }
+  return [best, bo];
+}
+function detectAxis(e0) {
+  const n = e0.length;
+  // remove the noise floor so that only real colour boundaries count
+  const sorted = Array.from(e0.subarray(1)).sort((a, b) => a - b);
+  const floor = sorted[Math.floor(sorted.length * 0.5)] * 1.5;
+  const e = e0.map(v => Math.max(0, v - floor));
+  let tot = 0; for (let i = 1; i < n; i++) tot += e[i];
+  const mean = tot / (n - 1);
+  if (mean <= 0) return { p: 8, off: 0, score: 0 };
+  let best = { s: -1, p: 0, o: 0 };
+  for (let p = 2; p <= Math.min(128, n / 12); p += Math.max(0.002, 0.1 * p * p / n)) {
+    const [s, o] = bestOffset(e, mean, p, 0.5);
+    if (s > best.s) best = { s, p, o };
+  }
+  // prefer the finest grid that is almost as good (sub-multiples of the best period)
+  for (let d = 8; d >= 2; d--) {
+    const q0 = best.p / d;
+    if (q0 < 2) continue;
+    let loc = { s: -1, p: 0, o: 0 };
+    for (let q = q0 * 0.97; q <= q0 * 1.03; q += Math.max(0.001, 0.2 * q * q / n)) {
+      const [s, o] = bestOffset(e, mean, q, 0.25);
+      if (s > loc.s) loc = { s, p: q, o };
+    }
+    if (loc.s >= best.s * 0.6) { best = loc; break; }
+  }
+  // fine refinement
+  let ref = best;
+  for (let q = best.p * 0.995; q <= best.p * 1.005; q += Math.max(0.0005, 0.05 * best.p * best.p / n)) {
+    const [s, o] = bestOffset(e, mean, q, 0.1);
+    if (s > ref.s) ref = { s, p: q, o };
+  }
+  return { p: ref.p, off: ref.o, score: ref.s };
+}
+// dot pitch from the autocorrelation of the edge profile (robust to a slowly drifting grid)
+function estimatePitch(e) {
+  const n = e.length, m = n - 1;
+  if (m < 16) return 0;
+  let mean = 0; for (let i = 1; i < n; i++) mean += e[i]; mean /= m;
+  const x = new Float64Array(m); for (let i = 0; i < m; i++) x[i] = e[i + 1] - mean;
+  const maxLag = Math.min(160, m >> 2);
+  const ac = new Float64Array(maxLag + 2);
+  for (let l = 1; l <= maxLag + 1; l++) { let s = 0; for (let i = 0; i + l < m; i++) s += x[i] * x[i + l]; ac[l] = s / (m - l); }
+  let mx = 0; const peaks = [];
+  for (let l = 2; l <= maxLag; l++) if (ac[l] > ac[l - 1] && ac[l] >= ac[l + 1]) { peaks.push(l); if (ac[l] > mx) mx = ac[l]; }
+  if (!peaks.length || mx <= 0) return 0;
+  const L = peaks.find(l => ac[l] >= mx * 0.4);
+  let p = L;
+  for (let k = 2; k <= 8 && k * L <= maxLag; k++) {   // refine with the k-th harmonic
+    const c = Math.round(k * p), r = Math.max(1, Math.round(k * p * 0.04));
+    let bl = -1, bv = -Infinity;
+    for (let l = Math.max(2, c - r); l <= Math.min(maxLag, c + r); l++) if (ac[l] > ac[l - 1] && ac[l] >= ac[l + 1] && ac[l] > bv) { bv = ac[l]; bl = l; }
+    if (bl < 0 || bv < mx * 0.15) break;
+    p = bl / k;
+  }
+  return p;
+}
+// cell boundaries with steps near p0 that land on strong edges (Viterbi)
+function dpBounds(e, p0) {
+  const n = e.length;
+  let mean = 0; for (let i = 1; i < n; i++) mean += e[i]; mean = mean / (n - 1) || 1;
+  const L = Math.max(1, Math.floor(p0 * 0.8)), H = Math.ceil(p0 * 1.25);
+  const gain = x => (x > 0 && x < n) ? Math.min(e[x] / mean, 6) - 0.3 : 0;
+  const sc = new Float64Array(n + 1).fill(-Infinity), prev = new Int32Array(n + 1).fill(-1);
+  for (let x = 0; x <= Math.min(H, n); x++) sc[x] = gain(x);
+  for (let x = 1; x <= n; x++) for (let d = L; d <= H; d++) {
+    const y = x - d; if (y < 0) break;
+    if (sc[y] === -Infinity) continue;
+    const v = sc[y] + gain(x) - 20 * ((d - p0) / p0) ** 2;
+    if (v > sc[x]) { sc[x] = v; prev[x] = y; }
+  }
+  let xe = n;
+  for (let x = Math.max(0, n - H); x <= n; x++) if (sc[x] > sc[xe]) xe = x;
+  const b = [];
+  for (; xe >= 0; xe = prev[xe]) b.push(xe);
+  b.reverse();
+  if (b[0] > 0) { if (b[0] >= p0 * 0.5) b.unshift(0); else b[0] = 0; }
+  if (b[b.length - 1] < n) { if (n - b[b.length - 1] >= p0 * 0.5) b.push(n); else b[b.length - 1] = n; }
+  return b;
+}
+// masked colour difference between two pixel offsets (transparent colour is ignored)
+let dark = null, outlineW = 1;   // dark = outline-coloured pixel mask
+function pd(i, k) {
+  const d = img.data, ai = d[i + 3], aj = d[k + 3], mi = ai ? 1 : 0, mj = aj ? 1 : 0;
+  const v = Math.abs(d[i] * mi - d[k] * mj) + Math.abs(d[i + 1] * mi - d[k + 1] * mj) + Math.abs(d[i + 2] * mi - d[k + 2] * mj) + Math.abs(ai - aj);
+  return outlineW !== 1 && dark[i >> 2] !== dark[k >> 2] ? v * outlineW : v;
+}
+function computeDark() {
+  const { w, h, data } = img, hist = new Uint32Array(256);
+  const lum = i => (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
+  let n = 0;
+  for (let i = 0; i < w * h; i++) if (data[i * 4 + 3] >= 128) { hist[lum(i * 4)]++; n++; }
+  dark = new Uint8Array(w * h);
+  if (!n) return;
+  let acc = 0, p5 = 0;
+  for (; p5 < 255; p5++) { acc += hist[p5]; if (acc >= n * 0.05) break; }
+  const thr = Math.min(p5 + 30, 100);
+  for (let i = 0; i < w * h; i++) if (data[i * 4 + 3] >= 128 && lum(i * 4) <= thr) dark[i] = 1;
+}
+// true when the dark strokes are about one dot wide (typical 1px outline)
+function judgeOutline(p) {
+  if (!(p >= 2)) return false;
+  const { w, h } = img, runs = [];
+  const scan = (len, lines, at) => {
+    for (const l of lines) {
+      let r = 0;
+      for (let t = 0; t <= len; t++) {
+        if (t < len && dark[at(l, t)]) r++;
+        else { if (r >= p * 0.4 && r < p * 2.6) runs.push(r); r = 0; }
+      }
+    }
+  };
+  const rows = [], cols = [];
+  for (let y = 0; y < h; y += 2) rows.push(y);
+  for (let x = 0; x < w; x += 2) cols.push(x);
+  scan(w, rows, (y, x) => y * w + x);
+  scan(h, cols, (x, y) => y * w + x);
+  if (runs.length < 40) return false;
+  runs.sort((a, b) => a - b);
+  const med = runs[runs.length >> 1] / p;
+  return med >= 0.6 && med <= 1.5;
+}
+// edge profiles per band: vertical=true -> profile along x for each row band given by `bounds`
+function bandEdges(vertical, bounds) {
+  const { w, h } = img, n = vertical ? w : h, E = [];
+  for (let j = 0; j < bounds.length - 1; j++) {
+    const e = new Float32Array(n);
+    for (let x = 1; x < n; x++) {
+      let s = 0;
+      for (let t = bounds[j]; t < bounds[j + 1]; t++) {
+        const i = vertical ? (t * w + x) * 4 : (x * w + t) * 4;
+        s += pd(i, vertical ? i - 4 : i - w * 4);
+      }
+      e[x] = s;
+    }
+    E.push(e);
+  }
+  return E;
+}
+// shift every grid line independently in each band (within frac of the pitch) to sit on the local edges
+function refineLines(base, E, frac) {
+  const K = base.length, M = E.length, n = E[0].length, R = 2;
+  const p = (base[K - 1] - base[0]) / (K - 1), L = Math.floor(frac * p);
+  let m = 0, c = 0; for (const e of E) for (let x = 1; x < n; x++) { m += e[x]; c++; }
+  m = m / c || 1;
+  const pos = [];
+  for (let i = 0; i < K; i++) {
+    const row = new Float64Array(M), b = base[i];
+    if (b <= 0 || b >= n || L < 1) row.fill(b);
+    else for (let j = 0; j < M; j++) {
+      const j0 = Math.max(0, j - R), j1 = Math.min(M - 1, j + R), cnt = j1 - j0 + 1;
+      let best = -Infinity, bd = 0;
+      for (let d = -L; d <= L; d++) {
+        const x = b + d; if (x < 1 || x >= n) continue;
+        let s = 0; for (let k = j0; k <= j1; k++) s += E[k][x];
+        s = s / m - 1.2 * cnt * (d / L) * (d / L);
+        if (s > best) { best = s; bd = d; }
+      }
+      row[j] = b + bd;
+    }
+    pos.push(row);
+  }
+  for (let j = 0; j < M; j++) for (let i = 1; i < K; i++) {   // keep the order of the lines
+    if (base[i] <= 0 || base[i] >= n) continue;
+    pos[i][j] = Math.max(pos[i][j], pos[i - 1][j] + 0.5 * p);
+  }
+  return pos;
+}
+function applyWarp() {
+  const f = $('gridMode').value === 'rect' ? 0 : P.warp / 100;
+  grid.wx = refineLines(grid.x, grid.Ev, f);
+  grid.wy = refineLines(grid.y, grid.Eh, f);
+}
+// re-centre the expected pitch on what the grid actually turned out to be
+function fitBounds(e, p) {
+  let b = dpBounds(e, p);
+  for (let it = 0; it < 4 && b.length > 4; it++) {
+    const q = (b[b.length - 2] - b[1]) / (b.length - 3);
+    if (Math.abs(q - p) < 0.02) break;
+    p = q; b = dpBounds(e, p);
+  }
+  return b;
+}
+const r2 = v => Math.round(v * 100) / 100;
+function autoDetect(force) {
+  if (!img) return;
+  if (force !== 'keep') {
+    outlineW = 1;
+    const ex0 = edgeProfile(true), ey0 = edgeProfile(false);
+    const p0 = ((estimatePitch(ex0) || 0) + (estimatePitch(ey0) || 0)) / 2;
+    $('outline1').checked = judgeOutline(p0);
+  }
+  outlineW = $('outline1').checked ? 3 : 1;
+  if ($('gridMode').value !== 'uniform') {
+    const ex = edgeProfile(true), ey = edgeProfile(false);
+    let px = estimatePitch(ex), py = estimatePitch(ey);
+    px = px || py; py = py || px;
+    if (px >= 2) {
+      grid = { x: fitBounds(ex, px), y: fitBounds(ey, py) };
+      grid.Ev = bandEdges(true, grid.y); grid.Eh = bandEdges(false, grid.x);
+      applyWarp();
+      const avg = b => (b[b.length - 1] - b[0]) / (b.length - 1);
+      const pw = avg(grid.x), ph = avg(grid.y);
+      setP('pw', r2(pw)); setP('ph', r2(ph)); syncMax();
+      setP('ox', r2(grid.x[0] % pw)); setP('oy', r2(grid.y[0] % ph));
+      $('info').dataset.det = `検出: 平均 ${r2(pw)}×${r2(ph)}px(不均一)${outlineW > 1 ? ' 輪郭1px' : ''}`;
+      schedule();
+      return;
+    }
+  }
+  grid = null;
+  const bx = detectAxis(edgeProfile(true)), by = detectAxis(edgeProfile(false));
+  let pw = bx.p, ph = by.p;
+  const sq = $('square').checked;
+  if (sq) {
+    // use the more reliable axis for the size, then re-fit the offset of the other
+    const src = bx.score >= by.score ? bx : by;
+    pw = ph = src.p;
+    const ey = edgeProfile(false), ex = edgeProfile(true);
+    const mean = e => { let t = 0; for (let i = 1; i < e.length; i++) t += e[i]; return t / (e.length - 1) || 1; };
+    bx.off = bestOffset(ex, mean(ex), pw, 0.1)[1];
+    by.off = bestOffset(ey, mean(ey), ph, 0.1)[1];
+  }
+  setP('pw', r2(pw)); setP('ph', r2(ph));
+  gridChanged();
+  setP('ox', r2(bx.off)); setP('oy', r2(by.off));
+  $('info').dataset.det = `検出: ${r2(pw)}×${r2(ph)}px  信頼度 X ${bx.score.toFixed(1)} / Y ${by.score.toFixed(1)}`;
+  schedule();
+}
+$('btnAuto').onclick = autoDetect;
+
+// ---------- color sampling ----------
+function cellColor(x0, y0, x1, y1, t, m) {
+  const { w, h, data } = img;
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const f = 1 - t;
+  const hx = Math.max(0.5, (x1 - x0) / 2 * f), hy = Math.max(0.5, (y1 - y0) / 2 * f);
+  let ia = Math.max(0, Math.ceil(cx - hx - 0.5)), ib = Math.min(w - 1, Math.floor(cx + hx - 0.5));
+  let ja = Math.max(0, Math.ceil(cy - hy - 0.5)), jb = Math.min(h - 1, Math.floor(cy + hy - 0.5));
+  if (ib < ia) ia = ib = Math.min(w - 1, Math.max(0, Math.floor(cx)));
+  if (jb < ja) ja = jb = Math.min(h - 1, Math.max(0, Math.floor(cy)));
+  const cnt = (ib - ia + 1) * (jb - ja + 1);
+  const stride = Math.max(1, Math.ceil(Math.sqrt(cnt / 1024)));
+  const pr = [], pg = [], pb = [];
+  let aSum = 0, n = 0;
+  for (let j = ja; j <= jb; j += stride) for (let i = ia; i <= ib; i += stride) {
+    const k = (j * w + i) * 4, a = data[k + 3];
+    aSum += a; n++;
+    if (a === 0) continue;
+    pr.push(data[k]); pg.push(data[k + 1]); pb.push(data[k + 2]);
+  }
+  const alpha = aSum / n;
+  const L = pr.length;
+  if (!L) return [0, 0, 0, 0];
+  const mean = (R) => {
+    let sr = 0, sg = 0, sb = 0;
+    for (let i = 0; i < L; i++) { sr += pr[i]; sg += pg[i]; sb += pb[i]; }
+    return [sr / L, sg / L, sb / L];
+  };
+  let c = mean();
+  if (m > 0.01 && L > 1) {
+    const R = 441 * (1 - m) * (1 - m) + 12, R2 = R * R;
+    const cs = Math.max(1, Math.floor(L / 48));
+    let bestN = -1, start = c;
+    for (let a = 0; a < L; a += cs) {
+      let q = 0;
+      for (let b = 0; b < L; b++) {
+        const dr = pr[a] - pr[b], dg = pg[a] - pg[b], db = pb[a] - pb[b];
+        if (dr * dr + dg * dg + db * db <= R2) q++;
+      }
+      if (q > bestN) { bestN = q; start = [pr[a], pg[a], pb[a]]; }
+    }
+    c = start;
+    for (let it = 0; it < 5; it++) {
+      let sr = 0, sg = 0, sb = 0, q = 0;
+      for (let b = 0; b < L; b++) {
+        const dr = c[0] - pr[b], dg = c[1] - pg[b], db = c[2] - pb[b];
+        if (dr * dr + dg * dg + db * db <= R2) { sr += pr[b]; sg += pg[b]; sb += pb[b]; q++; }
+      }
+      if (!q) break;
+      c = [sr / q, sg / q, sb / q];
+    }
+  }
+  return [Math.round(c[0]), Math.round(c[1]), Math.round(c[2]), alpha >= 128 ? 255 : 0];
+}
+
+// ---------- rebuild ----------
+let pending = false;
+function schedule() { if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; rebuild(); }); } }
+
+function cellRange(off, p, len) {
+  const k0 = off >= p * 0.5 ? -1 : 0;
+  const cells = [];
+  for (let k = k0; ; k++) {
+    const a = off + k * p, b = a + p;
+    if (a >= len) break;
+    const ca = Math.max(0, a), cb = Math.min(len, b);
+    if (cb - ca >= p * 0.5 - 1e-6) cells.push([ca, cb]);
+  }
+  return cells;
+}
+// crop the margin to the smallest rectangle and/or pad to a square
+function postProcess(data, W, H) {
+  let x0 = 0, y0 = 0, x1 = W, y1 = H;
+  const doCrop = $('crop').checked, doSq = $('makeSquare').checked;
+  let hasAlpha = false;
+  for (let i = 3; i < data.length; i += 4) if (data[i] < 255) { hasAlpha = true; break; }
+  const bg = hasAlpha ? null : data.slice(0, 4);
+  const isBg = i => hasAlpha ? data[i + 3] === 0 : (data[i] === bg[0] && data[i + 1] === bg[1] && data[i + 2] === bg[2]);
+  if (doCrop) {
+    x0 = W; y0 = H; x1 = 0; y1 = 0;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      if (isBg((y * W + x) * 4)) continue;
+      if (x < x0) x0 = x; if (x + 1 > x1) x1 = x + 1;
+      if (y < y0) y0 = y; if (y + 1 > y1) y1 = y + 1;
+    }
+    if (x1 <= x0) { x0 = 0; y0 = 0; x1 = W; y1 = H; }
+  }
+  const cw = x1 - x0, ch = y1 - y0;
+  const S = doSq ? Math.max(cw, ch) : 0;
+  const w = doSq ? S : cw, h = doSq ? S : ch;
+  const res = new Uint8ClampedArray(w * h * 4);
+  if (bg) for (let i = 0; i < res.length; i += 4) res.set(bg, i);
+  const ox = (w - cw) >> 1, oy = (h - ch) >> 1;
+  for (let y = 0; y < ch; y++) {
+    const a = ((y0 + y) * W + x0) * 4;
+    res.set(data.subarray(a, a + cw * 4), ((y + oy) * w + ox) * 4);
+  }
+  return { data: res, w, h };
+}
+$('crop').addEventListener('change', schedule);
+$('makeSquare').addEventListener('change', schedule);
+function rebuild() {
+  if (!img) return;
+  const pw = Math.max(1, P.pw), ph = Math.max(1, P.ph);
+  const xs = grid ? null : cellRange(P.ox, pw, img.w), ys = grid ? null : cellRange(P.oy, ph, img.h);
+  const W = grid ? grid.x.length - 1 : xs.length, H = grid ? grid.y.length - 1 : ys.length;
+  if (!W || !H) return;
+  const g = outC.getContext('2d');
+  const out = g.createImageData(W, H);
+  const t = P.center / 100, m = P.major / 100;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let c;
+    if (grid) {
+      const x0 = grid.wx[x][y], x1 = Math.max(x0 + 1, grid.wx[x + 1][y]), y0 = grid.wy[y][x], y1 = Math.max(y0 + 1, grid.wy[y + 1][x]);
+      c = cellColor(x0, y0, x1, y1, t, m);
+    } else c = cellColor(xs[x][0], ys[y][0], xs[x][1], ys[y][1], t, m);
+    out.data.set(c, (y * W + x) * 4);
+  }
+  const fin = postProcess(out.data, W, H);
+  outC.width = fin.w; outC.height = fin.h;
+  g.putImageData(new ImageData(fin.data, fin.w, fin.h), 0, 0);
+  $('outInfo').textContent = `${fin.w}×${fin.h} px`;
+  $('btnSave').disabled = $('btnCopy').disabled = false;
+  $('info').textContent = `${$('info').dataset.det || ''}\n出力: ${fin.w}×${fin.h} px`;
+  layoutOut();
+  drawOverlay();
+}
+function layoutOut() {
+  if (!outC.width) return;
+  let z = +$('zoom').value;
+  if (!z) {
+    const box = $('outScroll');
+    z = Math.max(1, Math.floor(Math.min((box.clientWidth - 24) / outC.width, (box.clientHeight - 24) / outC.height)));
+  }
+  outC.style.width = outC.width * z + 'px';
+  outC.style.height = outC.height * z + 'px';
+}
+window.addEventListener('resize', () => { layoutOut(); drawOverlay(); });
+
+function drawOverlay() {
+  if (!img) return;
+  const disp = srcC.getBoundingClientRect();
+  // overlay is drawn at source resolution; CSS scales both canvases identically
+  ovC.width = img.w; ovC.height = img.h;
+  const g = ovC.getContext('2d');
+  g.clearRect(0, 0, img.w, img.h);
+  srcC.style.width = ovC.style.width = '';
+  if (!$('showGrid').checked) return;
+  const pw = Math.max(1, P.pw), ph = Math.max(1, P.ph);
+  const lw = Math.max(1, Math.round(Math.min(img.w, img.h) / 600));
+  g.lineWidth = lw; g.strokeStyle = 'rgba(255,0,128,.75)';
+  g.beginPath();
+  const vx = grid ? grid.x : null, vy = grid ? grid.y : null;
+  if (grid) {
+    const M = vy.length - 1, N = vx.length - 1;
+    for (let i = 0; i <= N; i++) {
+      g.moveTo(grid.wx[i][0] + .5, vy[0]);
+      for (let j = 0; j < M; j++) g.lineTo(grid.wx[i][j] + .5, (vy[j] + vy[j + 1]) / 2);
+      g.lineTo(grid.wx[i][M - 1] + .5, vy[M]);
+    }
+    for (let j = 0; j <= M; j++) {
+      g.moveTo(vx[0], grid.wy[j][0] + .5);
+      for (let i = 0; i < N; i++) g.lineTo((vx[i] + vx[i + 1]) / 2, grid.wy[j][i] + .5);
+      g.lineTo(vx[N], grid.wy[j][N - 1] + .5);
+    }
+  } else {
+    for (let x = P.ox; x < img.w; x += pw) { g.moveTo(Math.round(x) + .5, 0); g.lineTo(Math.round(x) + .5, img.h); }
+    for (let y = P.oy; y < img.h; y += ph) { g.moveTo(0, Math.round(y) + .5); g.lineTo(img.w, Math.round(y) + .5); }
+  }
+  g.stroke();
+}
+
+// ---------- export ----------
+$('btnSave').onclick = () => {
+  outC.toBlob(b => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(b); a.download = `pixel_${outC.width}x${outC.height}.png`;
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }, 'image/png');
+};
+$('btnCopy').onclick = () => {
+  outC.toBlob(async b => {
+    try { await navigator.clipboard.write([new ClipboardItem({ 'image/png': b })]); }
+    catch (e) { alert('コピーできませんでした'); }
+  }, 'image/png');
+};
+
+// expose for debugging
+window.ToPixel = { loadBlob, P, autoDetect, edgeProfile, estimatePitch, dpBounds, fitBounds };
+gridChanged();
+})();
+</script>
+</body>
+</html>
