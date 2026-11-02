@@ -100,6 +100,8 @@
   <div class="hint">中心寄り: 0=マス全体の平均 / 100=中心の1点<br>多数決: 0=無効 / 大きいほど、マス内で最も多い色の集まりに寄せる</div>
 
   <h2>出力</h2>
+  <label class="chk"><input type="checkbox" id="flipH">画像を左右反転する</label>
+  <div class="hint">元画像も反転してから解析をやり直します</div>
   <label class="chk"><input type="checkbox" id="transBg">背景を透過にする(べた塗り背景を自動検出)</label>
   <div id="bgCtl"></div>
   <label class="chk"><input type="checkbox" id="islandTrans">島(囲まれた背景色の部分)も透過にする</label>
@@ -166,6 +168,8 @@ const T = {
   '輪郭を1ピクセルに寄せる': { en: 'Snap to 1-pixel outline', ko: '윤곽을 1픽셀로 맞추기', zh: '将轮廓对齐为1像素' },
   '読み込み時に自動判定します。ONだと暗い輪郭線の境目にグリッドを優先して合わせます': { en: 'Detected automatically on load. When ON, the grid is fitted preferentially to the edges of dark outlines.', ko: '불러올 때 자동 판정합니다. ON이면 어두운 윤곽선의 경계에 그리드를 우선 맞춥니다.', zh: '载入时自动判定。开启后网格会优先贴合深色轮廓线的边界。' },
   '縦横を同じサイズにする(均一時)': { en: 'Same width and height (uniform mode)', ko: '가로세로를 같은 크기로(균일 시)', zh: '宽高相同(均匀时)' },
+  '画像を左右反転する': { en: 'Flip image horizontally', ko: '이미지 좌우 반전', zh: '左右翻转图像' },
+  '元画像も反転してから解析をやり直します': { en: 'The source is flipped too and the analysis restarts.', ko: '원본 이미지도 반전한 뒤 분석을 다시 시작합니다.', zh: '原图也会翻转，并重新开始分析。' },
   '元画像にグリッドを重ねる': { en: 'Overlay grid on source', ko: '원본 이미지에 그리드 겹치기', zh: '在原图上叠加网格' },
   '色の取得': { en: 'Color sampling', ko: '색 추출', zh: '取色' },
   '中心寄り: 0=マス全体の平均 / 100=中心の1点': { en: 'Center bias: 0 = average of the whole cell / 100 = center point only', ko: '중심 쏠림: 0=칸 전체 평균 / 100=중심 1점', zh: '偏向中心:0=整格平均 / 100=仅中心一点' },
@@ -319,23 +323,34 @@ function loadBlob(blob) {
   const url = URL.createObjectURL(blob);
   const im = new Image();
   im.onload = () => {
-    const c = document.createElement('canvas');
-    c.width = im.naturalWidth; c.height = im.naturalHeight;
-    const g = c.getContext('2d', { willReadFrequently: true });
-    g.drawImage(im, 0, 0);
-    img = { w: c.width, h: c.height, data: g.getImageData(0, 0, c.width, c.height).data };
+    origC = document.createElement('canvas');
+    origC.width = im.naturalWidth; origC.height = im.naturalHeight;
+    origC.getContext('2d').drawImage(im, 0, 0);
     URL.revokeObjectURL(url);
-    srcC.width = ovC.width = 0; // reset
-    srcC.width = img.w; srcC.height = img.h;
-    srcC.getContext('2d').drawImage(im, 0, 0);
-    computeDark();
-    $('empty').style.display = 'none';
-    $('srcInfo').textContent = `${img.w}×${img.h}`;
-    autoDetect();
+    setSource();
   };
   im.onerror = () => { URL.revokeObjectURL(url); alert(t('画像を読み込めませんでした')); };
   im.src = url;
 }
+// builds the working image from the loaded one, mirrored when "flip" is on, and restarts the analysis
+let origC = null;
+function setSource() {
+  if (!origC) return;
+  const c = document.createElement('canvas');
+  c.width = origC.width; c.height = origC.height;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  if ($('flipH').checked) { g.translate(c.width, 0); g.scale(-1, 1); }
+  g.drawImage(origC, 0, 0);
+  img = { w: c.width, h: c.height, data: g.getImageData(0, 0, c.width, c.height).data };
+  srcC.width = ovC.width = 0; // reset
+  srcC.width = img.w; srcC.height = img.h;
+  srcC.getContext('2d').drawImage(c, 0, 0);
+  computeDark();
+  $('empty').style.display = 'none';
+  $('srcInfo').textContent = `${img.w}×${img.h}`;
+  autoDetect();
+}
+$('flipH').addEventListener('change', setSource);
 $('btnOpen').onclick = () => $('file').click();
 $('file').onchange = e => { loadBlob(e.target.files[0]); e.target.value = ''; };
 $('btnPaste').onclick = async () => {
