@@ -114,6 +114,7 @@
   <div class="hint" id="rInfo">暗い輪郭ピクセルは削らず、塗りの部分から縦横のシームを削除/複製して目標サイズに合わせます。切り取りの後・正方形化の前に適用します。</div>
   <div class="row" data-keep>
     <button id="btnSave" disabled>PNG保存</button>
+    <button id="btnPsd" disabled>PSD保存</button>
     <button id="btnCopy" disabled>クリップボードへコピー</button>
   </div>
   <div id="info" data-keep></div>
@@ -186,6 +187,7 @@ const T = {
   '高さ': { en: 'Height', ko: '높이', zh: '高' },
   '暗い輪郭ピクセルは削らず、塗りの部分から縦横のシームを削除/複製して目標サイズに合わせます。切り取りの後・正方形化の前に適用します。': { en: 'Dark outline pixels are never removed; seams are deleted or duplicated in the fill areas to reach the target size. Applied after cropping and before squaring.', ko: '어두운 윤곽 픽셀은 지우지 않고, 채색부에서 가로·세로 시임을 삭제/복제하여 목표 크기에 맞춥니다. 자르기 후, 정사각형화 전에 적용됩니다.', zh: '不会删除深色轮廓像素,而是在填色部分删除/复制纵横缝线以达到目标尺寸。在裁切之后、正方形化之前应用。' },
   'PNG保存': { en: 'Save PNG', ko: 'PNG 저장', zh: '保存PNG' },
+  'PSD保存': { en: 'Save PSD', ko: 'PSD 저장', zh: '保存PSD' },
   'クリップボードへコピー': { en: 'Copy to clipboard', ko: '클립보드에 복사', zh: '复制到剪贴板' },
   '元画像': { en: 'Source', ko: '원본 이미지', zh: '原图' },
   '結果(1ドット=1px)': { en: 'Result (1 dot = 1 px)', ko: '결과(1도트=1px)', zh: '结果(1点=1px)' },
@@ -323,11 +325,16 @@ function loadBlob(blob) {
   const url = URL.createObjectURL(blob);
   const im = new Image();
   im.onload = () => {
-    origC = document.createElement('canvas');
-    origC.width = im.naturalWidth; origC.height = im.naturalHeight;
-    origC.getContext('2d').drawImage(im, 0, 0);
     URL.revokeObjectURL(url);
-    setSource();
+    try {
+      // phone photos can exceed what a mobile canvas can hold (iOS: about 16.7M pixels): shrink them to fit
+      const k = Math.min(1, Math.sqrt(12e6 / (im.naturalWidth * im.naturalHeight)));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(im.naturalWidth * k)); c.height = Math.max(1, Math.round(im.naturalHeight * k));
+      c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+      origC = c;
+      setSource();
+    } catch (e) { alert(t('画像を読み込めませんでした')); }
   };
   im.onerror = () => { URL.revokeObjectURL(url); alert(t('画像を読み込めませんでした')); };
   im.src = url;
@@ -388,18 +395,38 @@ function edgeProfile(horizontal) {
   }
   return e;
 }
+// fraction of the samples along each line x where the line would cut through a dark stroke
+// (dark on both sides); null unless the 1px-outline mode is on
+const CUT_W = 4;
+function cutProfile(horizontal) {
+  if (outlineW === 1) return null;
+  const { w, h } = img;
+  const n = horizontal ? w : h, m = horizontal ? h : w;
+  const c = new Float64Array(n);
+  const step = Math.max(1, Math.floor(m / 600));
+  for (let a = 1; a < n; a++) {
+    let s = 0, q = 0;
+    for (let b = 0; b < m; b += step) {
+      const i = horizontal ? b * w + a : a * w + b;
+      if (dark[i] && dark[horizontal ? i - 1 : i - w]) s++;
+      q++;
+    }
+    c[a] = s / q;
+  }
+  return c;
+}
 // grid lines at off + k*p ; returns [score, bestOffset]
-function bestOffset(e, mean, p, offStep) {
+function bestOffset(e, mean, p, offStep, cp) {
   const n = e.length;
   let best = -1, bo = 0;
   for (let off = 0; off < p; off += offStep) {
-    let s = 0, c = 0;
-    for (let pos = off + (off < 1 ? p : 0); pos < n - 0.5; pos += p) { s += e[Math.round(pos)]; c++; }
-    if (c) { s = s / c / mean; if (s > best) { best = s; bo = off; } }
+    let s = 0, c = 0, u = 0;
+    for (let pos = off + (off < 1 ? p : 0); pos < n - 0.5; pos += p) { const r = Math.round(pos); s += e[r]; if (cp) u += cp[r]; c++; }
+    if (c) { s = s / c / mean - (cp ? CUT_W * u / c : 0); if (s > best) { best = s; bo = off; } }
   }
   return [best, bo];
 }
-function detectAxis(e0) {
+function detectAxis(e0, cp) {
   const n = e0.length;
   // remove the noise floor so that only real colour boundaries count
   const sorted = Array.from(e0.subarray(1)).sort((a, b) => a - b);
@@ -410,7 +437,7 @@ function detectAxis(e0) {
   if (mean <= 0) return { p: 8, off: 0, score: 0 };
   let best = { s: -1, p: 0, o: 0 };
   for (let p = 2; p <= Math.min(128, n / 12); p += Math.max(0.002, 0.1 * p * p / n)) {
-    const [s, o] = bestOffset(e, mean, p, 0.5);
+    const [s, o] = bestOffset(e, mean, p, 0.5, cp);
     if (s > best.s) best = { s, p, o };
   }
   // prefer the finest grid that is almost as good (sub-multiples of the best period)
@@ -419,7 +446,7 @@ function detectAxis(e0) {
     if (q0 < 2) continue;
     let loc = { s: -1, p: 0, o: 0 };
     for (let q = q0 * 0.97; q <= q0 * 1.03; q += Math.max(0.001, 0.2 * q * q / n)) {
-      const [s, o] = bestOffset(e, mean, q, 0.25);
+      const [s, o] = bestOffset(e, mean, q, 0.25, cp);
       if (s > loc.s) loc = { s, p: q, o };
     }
     if (loc.s >= best.s * 0.6) { best = loc; break; }
@@ -427,7 +454,7 @@ function detectAxis(e0) {
   // fine refinement
   let ref = best;
   for (let q = best.p * 0.995; q <= best.p * 1.005; q += Math.max(0.0005, 0.05 * best.p * best.p / n)) {
-    const [s, o] = bestOffset(e, mean, q, 0.1);
+    const [s, o] = bestOffset(e, mean, q, 0.1, cp);
     if (s > ref.s) ref = { s, p: q, o };
   }
   return { p: ref.p, off: ref.o, score: ref.s };
@@ -456,11 +483,11 @@ function estimatePitch(e) {
   return p;
 }
 // cell boundaries with steps near p0 that land on strong edges (Viterbi)
-function dpBounds(e, p0) {
+function dpBounds(e, p0, cp) {
   const n = e.length;
   let mean = 0; for (let i = 1; i < n; i++) mean += e[i]; mean = mean / (n - 1) || 1;
   const L = Math.max(1, Math.floor(p0 * 0.8)), H = Math.ceil(p0 * 1.25);
-  const gain = x => (x > 0 && x < n) ? Math.min(e[x] / mean, 6) - 0.3 : 0;
+  const gain = x => (x > 0 && x < n) ? Math.min(e[x] / mean, 6) - 0.3 - (cp ? CUT_W * cp[x] : 0) : 0;
   const sc = new Float64Array(n + 1).fill(-Infinity), prev = new Int32Array(n + 1).fill(-1);
   for (let x = 0; x <= Math.min(H, n); x++) sc[x] = gain(x);
   for (let x = 1; x <= n; x++) for (let d = L; d <= H; d++) {
@@ -479,7 +506,7 @@ function dpBounds(e, p0) {
   return b;
 }
 // masked colour difference between two pixel offsets (transparent colour is ignored)
-let dark = null, outlineW = 1;   // dark = outline-coloured pixel mask
+let dark = null, outlineW = 1, darkThr = 0;   // dark = outline-coloured pixel mask
 function pd(i, k) {
   const d = img.data, ai = d[i + 3], aj = d[k + 3], mi = ai ? 1 : 0, mj = aj ? 1 : 0;
   const v = Math.abs(d[i] * mi - d[k] * mj) + Math.abs(d[i + 1] * mi - d[k + 1] * mj) + Math.abs(d[i + 2] * mi - d[k + 2] * mj) + Math.abs(ai - aj);
@@ -494,7 +521,7 @@ function computeDark() {
   if (!n) return;
   let acc = 0, p5 = 0;
   for (; p5 < 255; p5++) { acc += hist[p5]; if (acc >= n * 0.05) break; }
-  const thr = Math.min(p5 + 30, 100);
+  const thr = darkThr = Math.min(p5 + 30, 100);
   for (let i = 0; i < w * h; i++) if (data[i * 4 + 3] >= 128 && lum(i * 4) <= thr) dark[i] = 1;
 }
 // true when the dark strokes are about one dot wide (typical 1px outline)
@@ -521,24 +548,27 @@ function judgeOutline(p) {
   return med >= 0.6 && med <= 1.5;
 }
 // edge profiles per band: vertical=true -> profile along x for each row band given by `bounds`
-function bandEdges(vertical, bounds) {
+// (cuts=true: fraction of dark-through-dark cuts instead; null when the outline mode is off)
+function bandEdges(vertical, bounds, cuts) {
+  if (cuts && outlineW === 1) return null;
   const { w, h } = img, n = vertical ? w : h, E = [];
   for (let j = 0; j < bounds.length - 1; j++) {
-    const e = new Float32Array(n);
+    const e = new Float32Array(n), len = Math.max(1, bounds[j + 1] - bounds[j]);
     for (let x = 1; x < n; x++) {
       let s = 0;
       for (let t = bounds[j]; t < bounds[j + 1]; t++) {
         const i = vertical ? (t * w + x) * 4 : (x * w + t) * 4;
-        s += pd(i, vertical ? i - 4 : i - w * 4);
+        if (cuts) { const k = i >> 2; if (dark[k] && dark[vertical ? k - 1 : k - w]) s++; }
+        else s += pd(i, vertical ? i - 4 : i - w * 4);
       }
-      e[x] = s;
+      e[x] = cuts ? s / len : s;
     }
     E.push(e);
   }
   return E;
 }
 // shift every grid line independently in each band (within frac of the pitch) to sit on the local edges
-function refineLines(base, E, frac) {
+function refineLines(base, E, frac, C) {
   const K = base.length, M = E.length, n = E[0].length, R = 2;
   const p = (base[K - 1] - base[0]) / (K - 1), L = Math.floor(frac * p);
   let m = 0, c = 0; for (const e of E) for (let x = 1; x < n; x++) { m += e[x]; c++; }
@@ -552,8 +582,8 @@ function refineLines(base, E, frac) {
       let best = -Infinity, bd = 0;
       for (let d = -L; d <= L; d++) {
         const x = b + d; if (x < 1 || x >= n) continue;
-        let s = 0; for (let k = j0; k <= j1; k++) s += E[k][x];
-        s = s / m - 1.2 * cnt * (d / L) * (d / L);
+        let s = 0, u = 0; for (let k = j0; k <= j1; k++) { s += E[k][x]; if (C) u += C[k][x]; }
+        s = s / m - 1.2 * cnt * (d / L) * (d / L) - CUT_W * u;
         if (s > best) { best = s; bd = d; }
       }
       row[j] = b + bd;
@@ -568,16 +598,16 @@ function refineLines(base, E, frac) {
 }
 function applyWarp() {
   const f = $('gridMode').value === 'rect' ? 0 : P.warp / 100;
-  grid.wx = refineLines(grid.x, grid.Ev, f);
-  grid.wy = refineLines(grid.y, grid.Eh, f);
+  grid.wx = refineLines(grid.x, grid.Ev, f, grid.Cv);
+  grid.wy = refineLines(grid.y, grid.Eh, f, grid.Ch);
 }
 // re-centre the expected pitch on what the grid actually turned out to be
-function fitBounds(e, p) {
-  let b = dpBounds(e, p);
+function fitBounds(e, p, cp) {
+  let b = dpBounds(e, p, cp);
   for (let it = 0; it < 4 && b.length > 4; it++) {
     const q = (b[b.length - 2] - b[1]) / (b.length - 3);
     if (Math.abs(q - p) < 0.02) break;
-    p = q; b = dpBounds(e, p);
+    p = q; b = dpBounds(e, p, cp);
   }
   return b;
 }
@@ -596,8 +626,9 @@ function autoDetect(force) {
     let px = estimatePitch(ex), py = estimatePitch(ey);
     px = px || py; py = py || px;
     if (px >= 2) {
-      grid = { x: fitBounds(ex, px), y: fitBounds(ey, py) };
+      grid = { x: fitBounds(ex, px, cutProfile(true)), y: fitBounds(ey, py, cutProfile(false)) };
       grid.Ev = bandEdges(true, grid.y); grid.Eh = bandEdges(false, grid.x);
+      grid.Cv = bandEdges(true, grid.y, true); grid.Ch = bandEdges(false, grid.x, true);
       applyWarp();
       const avg = b => (b[b.length - 1] - b[0]) / (b.length - 1);
       const pw = avg(grid.x), ph = avg(grid.y);
@@ -609,7 +640,8 @@ function autoDetect(force) {
     }
   }
   grid = null;
-  const bx = detectAxis(edgeProfile(true)), by = detectAxis(edgeProfile(false));
+  const cpx = cutProfile(true), cpy = cutProfile(false);
+  const bx = detectAxis(edgeProfile(true), cpx), by = detectAxis(edgeProfile(false), cpy);
   let pw = bx.p, ph = by.p;
   const sq = $('square').checked;
   if (sq) {
@@ -618,8 +650,8 @@ function autoDetect(force) {
     pw = ph = src.p;
     const ey = edgeProfile(false), ex = edgeProfile(true);
     const mean = e => { let t = 0; for (let i = 1; i < e.length; i++) t += e[i]; return t / (e.length - 1) || 1; };
-    bx.off = bestOffset(ex, mean(ex), pw, 0.1)[1];
-    by.off = bestOffset(ey, mean(ey), ph, 0.1)[1];
+    bx.off = bestOffset(ex, mean(ex), pw, 0.1, cpx)[1];
+    by.off = bestOffset(ey, mean(ey), ph, 0.1, cpy)[1];
   }
   setP('pw', r2(pw)); setP('ph', r2(ph));
   gridChanged();
@@ -684,6 +716,56 @@ function cellColor(x0, y0, x1, y1, t, m) {
   return [Math.round(c[0]), Math.round(c[1]), Math.round(c[2]), alpha >= 128 ? 255 : 0];
 }
 
+// ---------- 1px outline enforcement ----------
+// Two neighbouring outline cells whose source strokes together are only about one dot wide are one
+// stroke split by the grid: keep the cell holding more of it and give the other its outer neighbour's colour.
+// S = the image the rects refer to: { w, h, dark } (dark = outline mask); thr = outline luminance limit
+function thinOutline(d, rects, W, H, S = { w: img.w, h: img.h, dark }, thr = darkThr) {
+  const { w, h, dark: dk } = S;
+  const isO = i => d[i * 4 + 3] > 0 && lumAt(d, i * 4) <= thr;
+  const count = r => {   // dark pixel count inside rect r
+    let n = 0;
+    for (let y = Math.max(0, Math.floor(r[1])); y < Math.min(h, Math.ceil(r[3])); y++)
+      for (let x = Math.max(0, Math.floor(r[0])); x < Math.min(w, Math.ceil(r[2])); x++) n += dk[y * w + x];
+    return n;
+  };
+  // mean dark width (px) across the union rect u, measured along rows (horiz) or columns, ignoring empty lines
+  const span = (u, horiz) => {
+    const a0 = Math.max(0, Math.floor(horiz ? u[1] : u[0])), a1 = Math.min(horiz ? h : w, Math.ceil(horiz ? u[3] : u[2]));
+    const b0 = Math.max(0, Math.floor(horiz ? u[0] : u[1])), b1 = Math.min(horiz ? w : h, Math.ceil(horiz ? u[2] : u[3]));
+    let tot = 0, lines = 0;
+    for (let a = a0; a < a1; a += Math.max(1, ((a1 - a0) / 24) | 0)) {
+      let s = 0;
+      for (let b = b0; b < b1; b++) s += dk[horiz ? a * w + b : b * w + a];
+      if (s) { tot += s; lines++; }
+    }
+    return lines ? tot / lines : 0;
+  };
+  for (const horiz of [true, false]) {
+    const N1 = horiz ? H : W, N2 = horiz ? W : H;
+    const at = (a, b) => horiz ? a * W + b : b * W + a;   // a = line, b = position along it
+    for (let a = 0; a < N1; a++) {
+      let b = 0;
+      while (b < N2) {
+        if (!isO(at(a, b))) { b++; continue; }
+        let e = b; while (e < N2 && isO(at(a, e))) e++;
+        if (e - b === 2) {
+          const i = at(a, b), j = at(a, b + 1), ri = rects[i], rj = rects[j];
+          const p = horiz ? (ri[2] - ri[0] + rj[2] - rj[0]) / 2 : (ri[3] - ri[1] + rj[3] - rj[1]) / 2;
+          const u = [Math.min(ri[0], rj[0]), Math.min(ri[1], rj[1]), Math.max(ri[2], rj[2]), Math.max(ri[3], rj[3])];
+          if (span(u, horiz) < 1.4 * p) {
+            const loseFirst = count(ri) < count(rj);
+            const lose = loseFirst ? i : j, from = loseFirst ? (b > 0 ? at(a, b - 1) : -1) : (e < N2 ? at(a, e) : -1);
+            if (from >= 0 && !isO(from)) d.copyWithin(lose * 4, from * 4, from * 4 + 4);
+            else if (from < 0) d[lose * 4 + 3] = 0;
+          }
+        }
+        b = e;
+      }
+    }
+  }
+}
+
 // ---------- rebuild ----------
 let pending = false;
 function schedule() { if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; rebuild(); }); } }
@@ -699,7 +781,7 @@ function cellRange(off, p, len) {
   }
   return cells;
 }
-// ---------- forced resize (seam removal / duplication that spares outline pixels) ----------
+// ---------- forced resize (uniform scale that keeps 1px outlines) ----------
 let preSize = { w: 0, h: 0 };
 const lumAt = (d, i) => d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
 function darkThreshold(d) {
@@ -709,69 +791,143 @@ function darkThreshold(d) {
   for (; p5 < 255; p5++) { acc += hist[p5]; if (acc >= n * 0.05) break; }
   return Math.min(p5 + 30, 100);
 }
-function transpose(d, w, h) {
-  const o = new Uint8ClampedArray(d.length);
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) o.set(d.subarray((y * w + x) * 4, (y * w + x) * 4 + 4), (x * h + y) * 4);
-  return o;
-}
-function pixDist(d, i, j) {
-  if (d[i + 3] < 128 && d[j + 3] < 128) return 0;
-  return Math.abs(d[i] - d[j]) + Math.abs(d[i + 1] - d[j + 1]) + Math.abs(d[i + 2] - d[j + 2]) + Math.abs(d[i + 3] - d[j + 3]);
-}
-// cheapest top-to-bottom path (one pixel per row, moving at most one column) to delete
-function seamPath(d, w, h, thr) {
-  const m = new Float64Array(w * h), from = new Int8Array(w * h);
+// Uniform resample to tw x th (the same scale everywhere). Fill colours are voted per output cell from the
+// source pixels it covers; outlines are carried over as connected strokes and thinned back to 1px.
+function resizeUniform(d, w, h, tw, th, thr) {
+  const dkm = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) dkm[i] = d[i * 4 + 3] >= 128 && lumAt(d, i * 4) <= thr ? 1 : 0;
+  const sx = w / tw, sy = h / th, n = tw * th;
+  const frac = new Float32Array(n), lineKey = new Int32Array(n).fill(-2), fillKey = new Int32Array(n).fill(-2), rects = [];
+  const top = m => { let k = -2, v = 0; for (const [a, b] of m) if (b > v) { v = b; k = a; } return k; };
+  for (let ty = 0; ty < th; ty++) for (let tx = 0; tx < tw; tx++) {
+    const x0 = tx * sx, x1 = x0 + sx, y0 = ty * sy, y1 = y0 + sy, c = ty * tw + tx;
+    let dw = 0, tot = 0; const dm = new Map(), fm = new Map();
+    for (let y = Math.floor(y0); y < Math.min(h, Math.ceil(y1)); y++) {
+      const wy = Math.min(y + 1, y1) - Math.max(y, y0);
+      for (let x = Math.floor(x0); x < Math.min(w, Math.ceil(x1)); x++) {
+        const wt = wy * (Math.min(x + 1, x1) - Math.max(x, x0)), i = y * w + x, k = i * 4;
+        const key = d[k + 3] < 128 ? -1 : d[k] << 16 | d[k + 1] << 8 | d[k + 2];
+        const m = dkm[i] ? dm : fm;
+        m.set(key, (m.get(key) || 0) + wt); tot += wt; if (dkm[i]) dw += wt;
+      }
+    }
+    frac[c] = tot ? dw / tot : 0; lineKey[c] = top(dm); fillKey[c] = top(fm);
+    rects.push([x0, y0, x1, y1]);
+  }
+  // Outline cells: every cell holding the centre of an outline pixel, plus a straight path between the
+  // cells of two touching outline pixels (so no link of a line can be lost, also when enlarging).
+  const M = new Uint8Array(n);
+  const cx = x => Math.min(tw - 1, Math.floor((x + 0.5) / sx)), cy = y => Math.min(th - 1, Math.floor((y + 0.5) / sy));
+  const link = (ax, ay, bx, by) => {
+    const dx = Math.abs(bx - ax), dy = Math.abs(by - ay), steps = Math.max(dx, dy);
+    for (let s = 1; s < steps; s++) M[Math.round(ay + (by - ay) * s / steps) * tw + Math.round(ax + (bx - ax) * s / steps)] = 1;
+  };
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    const i = (y * w + x) * 4;
-    let c;
-    if (d[i + 3] < 128) c = 150;
-    else {
-      c = pixDist(d, x > 0 ? i - 4 : i, x < w - 1 ? i + 4 : i);
-      if (lumAt(d, i) <= thr) c += 4000;     // outline pixels are protected
+    if (!dkm[y * w + x]) continue;
+    const ax = cx(x), ay = cy(y);
+    M[ay * tw + ax] = 1;
+    for (const [ox, oy] of [[1, 0], [0, 1], [1, 1], [-1, 1]]) {
+      const x2 = x + ox, y2 = y + oy;
+      if (x2 < 0 || x2 >= w || y2 >= h || !dkm[y2 * w + x2]) continue;
+      link(ax, ay, cx(x2), cy(y2));
     }
-    if (y === 0) { m[x] = c; continue; }
-    let best = m[(y - 1) * w + x], f = 0;
-    if (x > 0 && m[(y - 1) * w + x - 1] + 20 < best) { best = m[(y - 1) * w + x - 1] + 20; f = -1; }
-    if (x < w - 1 && m[(y - 1) * w + x + 1] + 20 < best) { best = m[(y - 1) * w + x + 1] + 20; f = 1; }
-    m[y * w + x] = c + best; from[y * w + x] = f;
   }
-  const path = new Int32Array(h);
-  let x = 0;
-  for (let k = 1; k < w; k++) if (m[(h - 1) * w + k] < m[(h - 1) * w + x]) x = k;
-  for (let y = h - 1; y >= 0; y--) { path[y] = x; x += from[y * w + x]; }
-  return path;
+  for (let c = 0; c < n; c++) if (frac[c] >= 0.6) M[c] = 1;
+  // thin the strokes to 1px without breaking them: weakest cells first, only cells whose removal keeps the
+  // neighbourhood connected and opens no hole; end points and solid dark cells (>= 60%) stay
+  const at = (x, y) => x >= 0 && y >= 0 && x < tw && y < th && M[y * tw + x] === 1;
+  const RING = [[0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1]];   // N NE E SE S SW W NW
+  const simple = (x, y) => {
+    const fg = RING.map(([a, b]) => at(x + a, y + b));
+    const cnt = fg.filter(Boolean).length;
+    if (cnt < 2) return false;
+    const comps = (on, adj) => {          // components among ring cells where on[i] is true, joined when adj(i, j)
+      const seen = new Array(8).fill(false); let k = 0;
+      for (let i = 0; i < 8; i++) {
+        if (!on[i] || seen[i]) continue;
+        k++; const st = [i]; seen[i] = true;
+        while (st.length) { const u = st.pop(); for (let v = 0; v < 8; v++) if (on[v] && !seen[v] && adj(u, v)) { seen[v] = true; st.push(v); } }
+      }
+      return k;
+    };
+    const cheb = (u, v) => Math.max(Math.abs(RING[u][0] - RING[v][0]), Math.abs(RING[u][1] - RING[v][1]));
+    const man = (u, v) => Math.abs(RING[u][0] - RING[v][0]) + Math.abs(RING[u][1] - RING[v][1]);
+    if (comps(fg, (u, v) => cheb(u, v) === 1) !== 1) return false;
+    // background: 4-connected components that touch a 4-neighbour of the pixel must be exactly one
+    const bg = fg.map(v => !v);
+    let touching = 0; const seen = new Array(8).fill(false);
+    for (const s of [0, 2, 4, 6]) {
+      if (!bg[s] || seen[s]) continue;
+      touching++; const st = [s]; seen[s] = true;
+      while (st.length) { const u = st.pop(); for (let v = 0; v < 8; v++) if (bg[v] && !seen[v] && man(u, v) === 1) { seen[v] = true; st.push(v); } }
+    }
+    return touching === 1;
+  };
+  const cand = [];
+  for (let c = 0; c < n; c++) if (M[c] && frac[c] < 0.6) cand.push(c);
+  cand.sort((a, b) => frac[a] - frac[b]);
+  for (let pass = 0; pass < 4; pass++) {
+    let changed = false;
+    for (const c of cand) if (M[c] && simple(c % tw, (c / tw) | 0)) { M[c] = 0; changed = true; }
+    if (!changed) break;
+  }
+  const out = new Uint8ClampedArray(n * 4), put = (c, key) => out.set(key === -1 ? [0, 0, 0, 0] : [key >> 16, key >> 8 & 255, key & 255, 255], c * 4);
+  const nbr = (c, ok) => {
+    const x = c % tw, y = (c / tw) | 0;
+    for (const [a, b] of [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+      const u = x + a, v = y + b; if (u < 0 || v < 0 || u >= tw || v >= th) continue;
+      if (ok(v * tw + u)) return v * tw + u;
+    }
+    return -1;
+  };
+  const todo = [];
+  for (let c = 0; c < n; c++) {
+    if (M[c]) { if (lineKey[c] !== -2) put(c, lineKey[c]); else todo.push(c); }
+    else if (fillKey[c] !== -2) put(c, fillKey[c]);
+    else todo.push(c);
+  }
+  for (const c of todo) {       // no source colour of its own: an outline link cell takes a neighbouring outline colour, a covered fill cell a fill colour
+    const j = M[c] ? nbr(c, j => M[j] && lineKey[j] !== -2) : nbr(c, j => !M[j] && fillKey[j] !== -2);
+    put(c, j >= 0 ? (M[c] ? lineKey[j] : fillKey[j]) : (lineKey[c] !== -2 ? lineKey[c] : 0));
+  }
+  return { d: out, rects, dark: dkm };
 }
-// change the width to tw: shrink by deleting seams, grow by duplicating seams
-function resizeAxis(d, w, h, tw, thr) {
-  if (tw === w) return { d, w };
-  const k = Math.abs(tw - w);
-  let cur = d, cw = w;
-  const colMap = new Int32Array(w * h);
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) colMap[y * w + x] = x;
-  let map = colMap;
-  const seams = [];
-  for (let n = 0; n < k && cw > 1; n++) {
-    const p = seamPath(cur, cw, h, thr);
-    const nd = new Uint8ClampedArray((cw - 1) * h * 4), nm = new Int32Array((cw - 1) * h);
-    const seam = new Int32Array(h);
-    for (let y = 0; y < h; y++) {
-      const x0 = p[y]; seam[y] = map[y * cw + x0];
-      nd.set(cur.subarray(y * cw * 4, (y * cw + x0) * 4), y * (cw - 1) * 4);
-      nd.set(cur.subarray((y * cw + x0 + 1) * 4, (y + 1) * cw * 4), (y * (cw - 1) + x0) * 4);
-      nm.set(map.subarray(y * cw, y * cw + x0), y * (cw - 1));
-      nm.set(map.subarray(y * cw + x0 + 1, (y + 1) * cw), y * (cw - 1) + x0);
+// Resizing can leave outlines as   ■■□□ / □■■■   steps; turn them into   ■■□□ / □□■■   diagonals by dropping
+// the elbow pixel of an outline (exactly two dark neighbours at a right angle, the inner corner not dark,
+// and one arm only 2 long so real corners of long straight edges stay). The pixel takes the colour of the
+// cell on the side the outline leaves free.
+function smoothStairs(d, w, h, thr) {
+  const dk = (x, y) => x >= 0 && y >= 0 && x < w && y < h && d[(y * w + x) * 4 + 3] >= 128 && lumAt(d, (y * w + x) * 4) <= thr;
+  const run = (x, y, dx, dy) => { let n = 0; while (dk(x + dx * (n + 1), y + dy * (n + 1))) n++; return n; };
+  // elbow description at (x, y) or null; score = length of the two arms (the longer elbow of a pair is the one dropped)
+  const elbow = (x, y) => {
+    if (!dk(x, y)) return null;
+    const U = dk(x, y - 1), D = dk(x, y + 1), L = dk(x - 1, y), R = dk(x + 1, y);
+    if (U + D + L + R !== 2 || !(U || D) || !(L || R)) return null;
+    const vy = U ? -1 : 1, hx = L ? -1 : 1;
+    // any other dark neighbour might hang on this pixel: leave it alone so no stroke can break
+    let around = 0;
+    for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) if ((a || b) && dk(x + a, y + b)) around++;
+    if (around !== 2 && !(around === 3 && dk(x + hx, y + vy))) return null;
+    if (dk(x + hx, y + vy)) return null;                       // inner corner must be empty
+    const va = run(x, y, 0, vy), ha = run(x, y, hx, 0);
+    if (va > 1 && ha > 1) return null;                         // both arms long: a real corner
+    return { vy, hx, score: va + ha + run(x, y, 0, -vy) + run(x, y, -hx, 0) };
+  };
+  for (let pass = 0; pass < 4; pass++) {
+    let changed = false;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const e = elbow(x, y);
+      if (!e) continue;
+      const pv = elbow(x, y + e.vy), ph = elbow(x + e.hx, y);
+      if ((pv && pv.score > e.score) || (ph && ph.score > e.score)) continue;
+      const src = [[x - e.hx, y], [x, y - e.vy]].find(([a, b]) => a >= 0 && b >= 0 && a < w && b < h);
+      if (!src) continue;
+      d.copyWithin((y * w + x) * 4, (src[1] * w + src[0]) * 4, (src[1] * w + src[0]) * 4 + 4);
+      changed = true;
     }
-    seams.push(seam); cur = nd; map = nm; cw--;
+    if (!changed) break;
   }
-  if (tw < w) return { d: cur, w: cw };
-  const dup = new Uint8Array(w * h);
-  for (const sm of seams) for (let y = 0; y < h; y++) dup[y * w + sm[y]]++;
-  const out = new Uint8ClampedArray(tw * h * 4);
-  for (let y = 0; y < h; y++) {
-    let o = y * tw;
-    for (let x = 0; x < w; x++) for (let r = 0; r <= dup[y * w + x]; r++) out.set(d.subarray((y * w + x) * 4, (y * w + x) * 4 + 4), (o++) * 4);
-  }
-  return { d: out, w: tw };
 }
 // make a solid background transparent; returns a status message
 function applyBg(d, W, H) {
@@ -839,9 +995,9 @@ function postProcess(data, W, H) {
     const tw = Math.max(1, Math.min(2048, +$('rw').value | 0)) || cw, th = Math.max(1, Math.min(2048, +$('rh').value | 0)) || ch;
     if (tw !== cw || th !== ch) {
       const thr = darkThreshold(cd);
-      const r = resizeAxis(cd, cw, ch, tw, thr);                       // width -> tw
-      const t = resizeAxis(transpose(r.d, r.w, ch), ch, r.w, th, thr);  // height -> th (on the transposed image)
-      cd = transpose(t.d, th, r.w); cw = r.w; ch = th;
+      const r = resizeUniform(cd, cw, ch, tw, th, thr);
+      cd = r.d; cw = tw; ch = th;
+      smoothStairs(cd, cw, ch, thr);
     }
   }
   const S = doSq ? Math.max(cw, ch) : 0;
@@ -871,20 +1027,24 @@ function rebuild() {
   const g = outC.getContext('2d');
   const out = g.createImageData(W, H);
   const tc = P.center / 100, m = P.major / 100;
+  const rects = [];
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    let c;
+    let c, r;
     if (grid) {
       const x0 = grid.wx[x][y], x1 = Math.max(x0 + 1, grid.wx[x + 1][y]), y0 = grid.wy[y][x], y1 = Math.max(y0 + 1, grid.wy[y + 1][x]);
-      c = cellColor(x0, y0, x1, y1, tc, m);
-    } else c = cellColor(xs[x][0], ys[y][0], xs[x][1], ys[y][1], tc, m);
+      r = [x0, y0, x1, y1];
+    } else r = [xs[x][0], ys[y][0], xs[x][1], ys[y][1]];
+    c = cellColor(r[0], r[1], r[2], r[3], tc, m);
+    rects.push(r);
     out.data.set(c, (y * W + x) * 4);
   }
+  if (outlineW > 1) thinOutline(out.data, rects, W, H);
   const bgMsg = applyBg(out.data, W, H);
   const fin = postProcess(out.data, W, H);
   outC.width = fin.w; outC.height = fin.h;
   g.putImageData(new ImageData(fin.data, fin.w, fin.h), 0, 0);
   $('outInfo').textContent = `${fin.w}×${fin.h} px`;
-  $('btnSave').disabled = $('btnCopy').disabled = false;
+  $('btnSave').disabled = $('btnPsd').disabled = $('btnCopy').disabled = false;
   $('info').textContent = `${$('info').dataset.det || ''}${bgMsg ? '\n' + bgMsg : ''}\n${t('出力: {0}×{1} px', fin.w, fin.h)}${$('resizeOn').checked ? t('(リサイズ前 {0}×{1})', preSize.w, preSize.h) : ''}`;
   layoutOut();
   drawOverlay();
@@ -939,6 +1099,72 @@ function drawOverlay() {
   }
   g.stroke();
 }
+
+// ---------- PSD export: "Line" layer on top of a "Fill" layer ----------
+// Outline-coloured cells go to the line layer; under them the fill layer gets the nearest fill colour
+// (not transparent), so the picture stays complete when the line layer is hidden.
+function splitLayers(d, W, H) {
+  const isLine = i => d[i * 4 + 3] >= 128 && lumAt(d, i * 4) <= darkThr;
+  const isFill = i => d[i * 4 + 3] >= 128 && !isLine(i);
+  const line = new Uint8ClampedArray(d.length), fill = d.slice(), R = 8;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    if (!isLine(i)) continue;
+    line.set(d.subarray(i * 4, i * 4 + 4), i * 4);
+    let best = Infinity, votes = new Map();
+    for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+      const nx = x + dx, ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= W || ny >= H || !isFill(ny * W + nx)) continue;
+      const dd = dx * dx + dy * dy;
+      if (dd > best) continue;
+      if (dd < best) { best = dd; votes = new Map(); }
+      const k = (ny * W + nx) * 4, key = d[k] << 16 | d[k + 1] << 8 | d[k + 2];
+      votes.set(key, (votes.get(key) || 0) + 1);
+    }
+    if (best === Infinity) { fill[i * 4 + 3] = 0; continue; }
+    let top = -1, n = 0;
+    for (const [key, v] of votes) if (v > n) { n = v; top = key; }
+    fill.set([top >> 16, top >> 8 & 255, top & 255, 255], i * 4);
+  }
+  return { line, fill };
+}
+function buildPsd(W, H, layers) {   // layers: bottom to top, [{ name, data }] (RGBA)
+  const parts = [];
+  const u8 = (...v) => parts.push(Uint8Array.from(v));
+  const u16 = v => u8(v >> 8 & 255, v & 255);
+  const u32 = v => u8(v >>> 24, v >> 16 & 255, v >> 8 & 255, v & 255);
+  const ascii = s => parts.push(Uint8Array.from(s, c => c.charCodeAt(0)));
+  const plane = (d, c) => { const p = new Uint8Array(W * H); for (let i = 0; i < p.length; i++) p[i] = d[i * 4 + c]; return p; };
+  const names = layers.map(l => { const n = new Uint8Array(Math.ceil((l.name.length + 1) / 4) * 4); n[0] = l.name.length; for (let i = 0; i < l.name.length; i++) n[i + 1] = l.name.charCodeAt(i); return n; });
+  const recLen = names.reduce((s, n) => s + 66 + n.length, 0);
+  const chanLen = layers.length * 4 * (2 + W * H);
+  let infoLen = 2 + recLen + chanLen; infoLen += infoLen & 1;
+  ascii('8BPS'); u16(1); u8(0, 0, 0, 0, 0, 0); u16(4); u32(H); u32(W); u16(8); u16(3);   // header: RGBA, 8 bit
+  u32(0); u32(0);                                                                       // colour mode data, image resources
+  u32(infoLen + 8); u32(infoLen);
+  u16(65536 - layers.length);   // negative count: the first extra channel of the merged image is transparency
+  layers.forEach((l, k) => {
+    u32(0); u32(0); u32(H); u32(W); u16(4);
+    for (const id of [0, 1, 2, 65535]) { u16(id); u32(2 + W * H); }
+    ascii('8BIM'); ascii('norm'); u8(255, 0, 0, 0);
+    u32(4 + 4 + names[k].length); u32(0); u32(0); parts.push(names[k]);
+  });
+  for (const l of layers) for (const c of [0, 1, 2, 3]) { u16(0); parts.push(plane(l.data, c)); }
+  if ((2 + recLen + chanLen) & 1) u8(0);
+  u32(0);                                                                               // global layer mask info
+  const comp = new Uint8ClampedArray(W * H * 4);                                        // merged image
+  for (const l of layers) for (let i = 0; i < W * H; i++) if (l.data[i * 4 + 3] >= 128) comp.set(l.data.subarray(i * 4, i * 4 + 4), i * 4);
+  u16(0); for (const c of [0, 1, 2, 3]) parts.push(plane(comp, c));
+  return new Blob(parts, { type: 'image/vnd.adobe.photoshop' });
+}
+$('btnPsd').onclick = () => {
+  const W = outC.width, H = outC.height;
+  const { line, fill } = splitLayers(outC.getContext('2d').getImageData(0, 0, W, H).data, W, H);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(buildPsd(W, H, [{ name: 'Fill', data: fill }, { name: 'Line', data: line }]));
+  a.download = `${srcName || 'pixel'}_${W}x${H}.psd`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
 
 // ---------- export ----------
 $('btnSave').onclick = () => {
