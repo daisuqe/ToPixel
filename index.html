@@ -82,6 +82,8 @@
 
   <h2>グリッド解析</h2>
   <div class="row"><button id="btnAuto">自動解析</button></div>
+  <div class="row" id="cands"></div>
+  <div class="hint" id="candHint"></div>
   <div class="ctl"><label><span>グリッド方式</span></label>
     <select id="gridMode" style="width:100%;background:#181a1f;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px">
       <option value="quad">不均一・四角形(線が曲がる)</option>
@@ -160,6 +162,14 @@ const T = {
   '貼り付け': { en: 'Paste', ko: '붙여넣기', zh: '粘贴' },
   'Ctrl+V・ドラッグ&ドロップでも読み込めます': { en: 'You can also load with Ctrl+V or drag & drop', ko: 'Ctrl+V, 드래그 앤 드롭으로도 불러올 수 있습니다', zh: '也可以用 Ctrl+V 或拖放载入' },
   'グリッド解析': { en: 'Grid analysis', ko: '그리드 분석', zh: '网格分析' },
+  '有力': { en: 'most likely', ko: '유력', zh: '最可能' },
+  '総合': { en: 'Combined', ko: '종합', zh: '综合' },
+  '塗りの段差幅': { en: 'Colour step width', ko: '색 단차 폭', zh: '色块台阶宽度' },
+  '輪郭線の太さ': { en: 'Outline thickness', ko: '윤곽선 두께', zh: '轮廓线粗细' },
+  'エッジの周期': { en: 'Edge period', ko: '엣지 주기', zh: '边缘周期' },
+  '半分': { en: 'Half', ko: '절반', zh: '一半' },
+  '2倍': { en: 'Double', ko: '2배', zh: '两倍' },
+  '解析候補(押すとそのドットサイズで再解析)': { en: 'Candidates (click to re-detect with that dot size)', ko: '분석 후보(누르면 그 도트 크기로 재분석)', zh: '候选(点击以该点阵大小重新分析)' },
   '自動解析': { en: 'Auto detect', ko: '자동 분석', zh: '自动分析' },
   'グリッド方式': { en: 'Grid mode', ko: '그리드 방식', zh: '网格方式' },
   '不均一・四角形(線が曲がる)': { en: 'Uneven - quadrilateral (curved lines)', ko: '불균일·사각형(선이 휨)', zh: '不均匀·四边形(线条可弯曲)' },
@@ -475,12 +485,24 @@ function runPitch(horizontal) {
     }
   }
   if (runs.length < 30) return 0;
-  const hist = new Uint32Array(Math.max(...runs) + 2);
-  for (const r of runs) hist[r]++;
-  let mx = 0; for (let r = 3; r < hist.length; r++) mx = Math.max(mx, hist[r] + (hist[r - 1] || 0) + (hist[r + 1] || 0));
+  // comb score: run lengths cluster at multiples of the pitch; sub-multiples tie, so the largest near-best pitch wins
+  const cand = [];
+  let top = -Infinity;
+  for (let q = 4; q <= 150; q *= 1.006) {
+    let sc = 0;
+    for (const r of runs) if (r >= 4 && r >= 0.75 * q) sc += Math.cos(2 * Math.PI * r / q);
+    cand.push([q, sc]);
+    if (sc > top) top = sc;
+  }
+  if (!(top > 0)) return 0;
   let L = 0;
-  for (let r = 3; r < hist.length - 1; r++) if (hist[r - 1] + hist[r] + hist[r + 1] >= mx * 0.3 && hist[r] >= hist[r - 1] && hist[r] >= hist[r + 1]) { L = r; break; }
-  if (!L) return 0;
+  for (let k = cand.length - 1; k >= 0; k--) {
+    const [q, sc] = cand[k];
+    if (sc < top * 0.85) continue;
+    // the local maximum of this peak
+    let bk = k; while (bk > 0 && cand[bk - 1][1] >= cand[bk][1]) bk--;
+    L = cand[bk][0]; break;
+  }
   let p = L;
   for (let it = 0; it < 4; it++) {
     let sr = 0, sk = 0;
@@ -489,6 +511,30 @@ function runPitch(horizontal) {
     p = sr / sk;
   }
   return p;
+}
+// dot pitch from the thickness of the dark outline: its stroke width is one dot, so the mode of
+// the dark run lengths is the pitch (0 when no dominant thickness exists)
+function outlinePitch(horizontal, base) {
+  const { w, h } = img;
+  const n = horizontal ? w : h, m = horizontal ? h : w;
+  const step = Math.max(1, Math.floor(m / 400)), runs = [];
+  for (let b = 0; b < m; b += step) {
+    let r = 0;
+    for (let a = 0; a <= n; a++) {
+      if (a < n && dark[horizontal ? b * w + a : a * w + b]) r++;
+      else { if (r >= 4 && r < 80) runs.push(r); r = 0; }
+    }
+  }
+  if (runs.length < 40) return 0;
+  const hist = new Float64Array(82);
+  for (const r of runs) hist[r]++;
+  let L = 0, bv = 0;
+  for (let r = 4; r < 80; r++) { const v = hist[r - 1] + hist[r] + hist[r + 1]; if (v > bv) { bv = v; L = r; } }
+  if (bv < runs.length * 0.25) return 0;
+  let sr = 0, sk = 0;
+  for (const r of runs) if (Math.abs(r - L) <= 0.25 * L) { sr += r; sk++; }
+  const p = sr / sk;
+  return !base || (p >= base * 0.4 && p <= base * 2.5) ? p : 0;
 }
 // dot pitch from the autocorrelation of the edge profile (robust to a slowly drifting grid)
 function estimatePitch(e) {
@@ -644,7 +690,45 @@ function fitBounds(e, p, cp) {
 }
 const r2 = v => Math.round(v * 100) / 100;
 const MAX_RATIO = 1.35;
-function autoDetect(force) {
+// candidate dot sizes from the different measurements; the first one is what the auto detection uses
+let cands = [], bestCand = null;   // bestCand = the most likely one (selected by default)
+function buildCands() {
+  const ex = edgeProfile(true), ey = edgeProfile(false);
+  const both = (a, b) => [a || b, b || a];
+  const [rx, ry] = both(runPitch(true), runPitch(false));
+  const [ax, ay] = both(estimatePitch(ex), estimatePitch(ey));
+  const bx = rx || ax, by = ry || ay;
+  const [ox, oy] = both(outlinePitch(true, bx || by), outlinePitch(false, by || bx));
+  const list = [];
+  const add = (name, px, py) => {
+    if (!(px >= 2 && py >= 2)) return;
+    if (list.some(c => Math.abs(c.px / px - 1) < 0.08 && Math.abs(c.py / py - 1) < 0.08)) return;
+    list.push({ name, px, py });
+  };
+  if (outlineW > 1 && ox) add(t('総合'), ox, oy); else add(t('総合'), bx, by);
+  add(t('塗りの段差幅'), rx, ry);
+  add(t('輪郭線の太さ'), ox, oy);
+  add(t('エッジの周期'), ax, ay);
+  const a = list[0];
+  if (a && list.length < 3) { add(t('半分'), a.px / 2, a.py / 2); add(t('2倍'), a.px * 2, a.py * 2); }
+  const top = list.slice(0, 4);
+  bestCand = top[0] || null;
+  return top.sort((p, q) => p.px + p.py - q.px - q.py);   // A, B, ... in ascending size
+}
+function renderCands(sel) {
+  const box = $('cands');
+  box.textContent = '';
+  cands.forEach((c, i) => {
+    const b = document.createElement('button');
+    b.textContent = `${'ABCD'[i]} ${r2((c.px + c.py) / 2)}${c === bestCand ? ' ★' : ''}`;
+    b.title = c.name;
+    if (i === sel) b.style.outline = '2px solid var(--accent, #5b9dff)';
+    b.onclick = () => autoDetect('keep', c);
+    box.appendChild(b);
+  });
+  $('candHint').textContent = cands.length > 1 ? `${t('解析候補(押すとそのドットサイズで再解析)')} ★=${t('有力')}: ${cands.map((c, i) => 'ABCD'[i] + '=' + c.name).join(' / ')}` : '';
+}
+function autoDetect(force, pick) {
   if (!img) return;
   if (force !== 'keep') {
     outlineW = 1;
@@ -653,10 +737,12 @@ function autoDetect(force) {
     $('outline1').checked = judgeOutline(p0);
   }
   outlineW = $('outline1').checked ? 3 : 1;
+  if (!pick) cands = buildCands();
+  const use = pick || bestCand || { px: 0, py: 0 };
+  renderCands(Math.max(0, cands.indexOf(use)));
   if ($('gridMode').value !== 'uniform') {
     const ex = edgeProfile(true), ey = edgeProfile(false);
-    let px = runPitch(true) || estimatePitch(ex), py = runPitch(false) || estimatePitch(ey);
-    px = px || py; py = py || px;
+    const px = use.px, py = use.py;
     if (px >= 2) {
       const cpx = cutProfile(true), cpy = cutProfile(false);
       const av = b => (b[b.length - 1] - b[0]) / (b.length - 1);
@@ -679,8 +765,7 @@ function autoDetect(force) {
   grid = null;
   const cpx = cutProfile(true), cpy = cutProfile(false);
   const ex1 = edgeProfile(true), ey1 = edgeProfile(false);
-  let hx = runPitch(true) || estimatePitch(ex1), hy = runPitch(false) || estimatePitch(ey1);
-  hx = hx || hy; hy = hy || hx;
+  const hx = use.px, hy = use.py;
   const bx = detectAxis(ex1, cpx, hx >= 2 ? hx : 0), by = detectAxis(ey1, cpy, hy >= 2 ? hy : 0);
   let pw = bx.p, ph = by.p;
   const sq = $('square').checked;
