@@ -426,7 +426,7 @@ function bestOffset(e, mean, p, offStep, cp) {
   }
   return [best, bo];
 }
-function detectAxis(e0, cp) {
+function detectAxis(e0, cp, hint) {
   const n = e0.length;
   // remove the noise floor so that only real colour boundaries count
   const sorted = Array.from(e0.subarray(1)).sort((a, b) => a - b);
@@ -436,12 +436,13 @@ function detectAxis(e0, cp) {
   const mean = tot / (n - 1);
   if (mean <= 0) return { p: 8, off: 0, score: 0 };
   let best = { s: -1, p: 0, o: 0 };
-  for (let p = 2; p <= Math.min(128, n / 12); p += Math.max(0.002, 0.1 * p * p / n)) {
+  const pLo = hint ? hint * 0.9 : 2, pHi = hint ? hint * 1.1 : Math.min(128, n / 12);   // hint = autocorrelation pitch
+  for (let p = pLo; p <= pHi; p += Math.max(0.002, 0.1 * p * p / n)) {
     const [s, o] = bestOffset(e, mean, p, 0.5, cp);
     if (s > best.s) best = { s, p, o };
   }
   // prefer the finest grid that is almost as good (sub-multiples of the best period)
-  for (let d = 8; d >= 2; d--) {
+  for (let d = hint ? 1 : 8; d >= 2; d--) {
     const q0 = best.p / d;
     if (q0 < 2) continue;
     let loc = { s: -1, p: 0, o: 0 };
@@ -458,6 +459,36 @@ function detectAxis(e0, cp) {
     if (s > ref.s) ref = { s, p: q, o };
   }
   return { p: ref.p, off: ref.o, score: ref.s };
+}
+// dot pitch as the average unit of the colour-step widths: lengths of the constant-colour runs
+// are 1, 2, 3... dots, so take the smallest well-populated cluster and refine against all runs
+function runPitch(horizontal) {
+  const { w, h, data } = img;
+  const n = horizontal ? w : h, m = horizontal ? h : w;
+  const step = Math.max(1, Math.floor(m / 400)), runs = [];
+  for (let b = 0; b < m; b += step) {
+    let start = -1;
+    for (let a = 1; a < n; a++) {
+      const i = horizontal ? (b * w + a) * 4 : (a * w + b) * 4, j = horizontal ? i - 4 : i - w * 4;
+      const d = Math.abs(data[i] - data[j]) + Math.abs(data[i + 1] - data[j + 1]) + Math.abs(data[i + 2] - data[j + 2]) + Math.abs(data[i + 3] - data[j + 3]);
+      if (d > 48) { if (start >= 0 && a - start >= 3) runs.push(a - start); start = a; }
+    }
+  }
+  if (runs.length < 30) return 0;
+  const hist = new Uint32Array(Math.max(...runs) + 2);
+  for (const r of runs) hist[r]++;
+  let mx = 0; for (let r = 3; r < hist.length; r++) mx = Math.max(mx, hist[r] + (hist[r - 1] || 0) + (hist[r + 1] || 0));
+  let L = 0;
+  for (let r = 3; r < hist.length - 1; r++) if (hist[r - 1] + hist[r] + hist[r + 1] >= mx * 0.3 && hist[r] >= hist[r - 1] && hist[r] >= hist[r + 1]) { L = r; break; }
+  if (!L) return 0;
+  let p = L;
+  for (let it = 0; it < 4; it++) {
+    let sr = 0, sk = 0;
+    for (const r of runs) { const k = Math.round(r / p); if (k >= 1 && k <= 6 && Math.abs(r - k * p) < 0.25 * p) { sr += r; sk += k; } }
+    if (!sk) break;
+    p = sr / sk;
+  }
+  return p;
 }
 // dot pitch from the autocorrelation of the edge profile (robust to a slowly drifting grid)
 function estimatePitch(e) {
@@ -612,6 +643,7 @@ function fitBounds(e, p, cp) {
   return b;
 }
 const r2 = v => Math.round(v * 100) / 100;
+const MAX_RATIO = 1.35;
 function autoDetect(force) {
   if (!img) return;
   if (force !== 'keep') {
@@ -623,10 +655,15 @@ function autoDetect(force) {
   outlineW = $('outline1').checked ? 3 : 1;
   if ($('gridMode').value !== 'uniform') {
     const ex = edgeProfile(true), ey = edgeProfile(false);
-    let px = estimatePitch(ex), py = estimatePitch(ey);
+    let px = runPitch(true) || estimatePitch(ex), py = runPitch(false) || estimatePitch(ey);
     px = px || py; py = py || px;
     if (px >= 2) {
-      grid = { x: fitBounds(ex, px, cutProfile(true)), y: fitBounds(ey, py, cutProfile(false)) };
+      const cpx = cutProfile(true), cpy = cutProfile(false);
+      const av = b => (b[b.length - 1] - b[0]) / (b.length - 1);
+      grid = { x: fitBounds(ex, px, cpx), y: fitBounds(ey, py, cpy) };
+      // dots are never more than 1.35:1 (or 1:1.35); the axis that found a multiple of the pitch follows the other
+      if (av(grid.x) > av(grid.y) * MAX_RATIO) grid.x = dpBounds(ex, av(grid.y), cpx);
+      else if (av(grid.y) > av(grid.x) * MAX_RATIO) grid.y = dpBounds(ey, av(grid.x), cpy);
       grid.Ev = bandEdges(true, grid.y); grid.Eh = bandEdges(false, grid.x);
       grid.Cv = bandEdges(true, grid.y, true); grid.Ch = bandEdges(false, grid.x, true);
       applyWarp();
@@ -641,12 +678,16 @@ function autoDetect(force) {
   }
   grid = null;
   const cpx = cutProfile(true), cpy = cutProfile(false);
-  const bx = detectAxis(edgeProfile(true), cpx), by = detectAxis(edgeProfile(false), cpy);
+  const ex1 = edgeProfile(true), ey1 = edgeProfile(false);
+  let hx = runPitch(true) || estimatePitch(ex1), hy = runPitch(false) || estimatePitch(ey1);
+  hx = hx || hy; hy = hy || hx;
+  const bx = detectAxis(ex1, cpx, hx >= 2 ? hx : 0), by = detectAxis(ey1, cpy, hy >= 2 ? hy : 0);
   let pw = bx.p, ph = by.p;
   const sq = $('square').checked;
-  if (sq) {
-    // use the more reliable axis for the size, then re-fit the offset of the other
-    const src = bx.score >= by.score ? bx : by;
+  const bad = pw > ph * MAX_RATIO || ph > pw * MAX_RATIO;
+  if (sq || bad) {
+    // use the more reliable axis (the finer one when the ratio is implausible) for the size, then re-fit the offset of the other
+    const src = bad ? (pw < ph ? bx : by) : bx.score >= by.score ? bx : by;
     pw = ph = src.p;
     const ey = edgeProfile(false), ex = edgeProfile(true);
     const mean = e => { let t = 0; for (let i = 1; i < e.length; i++) t += e[i]; return t / (e.length - 1) || 1; };
