@@ -114,6 +114,13 @@
   <label class="chk"><input type="checkbox" id="resizeOn">強制リサイズ(輪郭を保って塗りを伸縮)</label>
   <div class="ctl"><div class="inp">幅 <input type="number" id="rw" min="1" max="2048"> 高さ <input type="number" id="rh" min="1" max="2048"></div></div>
   <div class="hint" id="rInfo">暗い輪郭ピクセルは削らず、塗りの部分から縦横のシームを削除/複製して目標サイズに合わせます。切り取りの後・正方形化の前に適用します。</div>
+  <div class="ctl"><label><span>減色(使う色数の上限)</span></label>
+    <select id="colorLimit" style="width:100%;background:#181a1f;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px">
+      <option value="0">しない</option>
+      <option value="8">8色</option><option value="16">16色</option><option value="24">24色</option>
+      <option value="32">32色</option><option value="48">48色</option><option value="64">64色</option><option value="128">128色</option>
+    </select></div>
+  <div class="hint">k-means法で代表色にまとめます(初期値はメディアンカット、Lab色空間)。小さな差し色が消えにくいよう、色の面積は平方根で重みづけします。透明は数えません</div>
   <div class="row" data-keep>
     <button id="btnSave" disabled>PNG保存</button>
     <button id="btnPsd" disabled>PSD保存</button>
@@ -163,6 +170,11 @@ const T = {
   'Ctrl+V・ドラッグ&ドロップでも読み込めます': { en: 'You can also load with Ctrl+V or drag & drop', ko: 'Ctrl+V, 드래그 앤 드롭으로도 불러올 수 있습니다', zh: '也可以用 Ctrl+V 或拖放载入' },
   'グリッド解析': { en: 'Grid analysis', ko: '그리드 분석', zh: '网格分析' },
   '有力': { en: 'most likely', ko: '유력', zh: '最可能' },
+  '減色(使う色数の上限)': { en: 'Reduce colours (max palette size)', ko: '감색(사용 색 수 상한)', zh: '减色(调色板上限)' },
+  'しない': { en: 'Off', ko: '안 함', zh: '关闭' },
+  '{0}色': { en: '{0} colours', ko: '{0}색', zh: '{0}色' },
+  'k-means法で代表色にまとめます(初期値はメディアンカット、Lab色空間)。小さな差し色が消えにくいよう、色の面積は平方根で重みづけします。透明は数えません': { en: 'Merges colours into representative ones with k-means (median-cut start, Lab space). Colour areas are weighted by their square root so small accent colours survive. Transparent pixels are not counted.', ko: 'k-means로 대표색으로 합칩니다(초기값은 메디안 컷, Lab 색공간). 작은 포인트 색이 남도록 면적은 제곱근으로 가중합니다. 투명은 세지 않습니다.', zh: '用 k-means 合并为代表色(以中位切分为初值,Lab 色彩空间)。面积按平方根加权,以保留小面积点缀色。透明不计入。' },
+  '色数: {0} → {1}': { en: 'Colours: {0} → {1}', ko: '색 수: {0} → {1}', zh: '颜色数: {0} → {1}' },
   '総合': { en: 'Combined', ko: '종합', zh: '综合' },
   '塗りの段差幅': { en: 'Colour step width', ko: '색 단차 폭', zh: '色块台阶宽度' },
   '輪郭線の太さ': { en: 'Outline thickness', ko: '윤곽선 두께', zh: '轮廓线粗细' },
@@ -1093,6 +1105,79 @@ function applyBg(d, W, H) {
   for (let p = 0; p < W * H; p++) if (seen[p]) { d[p * 4 + 3] = 0; n++; }
   return t('背景: rgb({0}) を透過 ({1}px)', bg.map(Math.round), n);
 }
+// ---------- colour reduction (median-cut start, then weighted k-means in Lab) ----------
+const lin = v => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+function rgb2lab(r, g, b) {
+  const R = lin(r), G = lin(g), B = lin(b);
+  const f = v => v > 0.008856 ? Math.cbrt(v) : 7.787 * v + 16 / 116;
+  const x = f((0.4124 * R + 0.3576 * G + 0.1805 * B) / 0.95047), y = f(0.2126 * R + 0.7152 * G + 0.0722 * B), z = f((0.0193 * R + 0.1192 * G + 0.9505 * B) / 1.08883);
+  return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+}
+function lab2rgb(L, a, b) {
+  const y = (L + 16) / 116, x = a / 500 + y, z = y - b / 200;
+  const f = v => v ** 3 > 0.008856 ? v ** 3 : (v - 16 / 116) / 7.787;
+  const X = f(x) * 0.95047, Y = f(y), Z = f(z);
+  const c = v => { v = Math.max(0, Math.min(1, v)); return Math.round(255 * (v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055)); };
+  return [c(3.2406 * X - 1.5372 * Y - 0.4986 * Z), c(-0.9689 * X + 1.8758 * Y + 0.0415 * Z), c(0.0557 * X - 0.204 * Y + 1.057 * Z)];
+}
+// returns {from, to}: colour counts before / after (pixels with alpha 0 are ignored)
+function reduceColors(d, K) {
+  const cnt = new Map();
+  for (let i = 0; i < d.length; i += 4) {
+    if (!d[i + 3]) continue;
+    const k = d[i] << 16 | d[i + 1] << 8 | d[i + 2];
+    cnt.set(k, (cnt.get(k) || 0) + 1);
+  }
+  const from = cnt.size;
+  if (!K || from <= K) return { from, to: from };
+  const keys = [...cnt.keys()], n = keys.length;
+  const L = keys.map(k => rgb2lab(k >> 16, k >> 8 & 255, k & 255)), wt = keys.map(k => Math.sqrt(cnt.get(k)));
+  // median cut: split the box with the largest weighted spread at its weighted median along its widest axis
+  let boxes = [Array.from({ length: n }, (_, i) => i)];
+  const spread = bx => {
+    let w = 0, m = [0, 0, 0]; for (const i of bx) { w += wt[i]; for (let c = 0; c < 3; c++) m[c] += wt[i] * L[i][c]; }
+    let v = 0; for (const i of bx) for (let c = 0; c < 3; c++) v += wt[i] * (L[i][c] - m[c] / w) ** 2;
+    return v;
+  };
+  while (boxes.length < K) {
+    let bi = -1, bs = 0;
+    boxes.forEach((bx, i) => { if (bx.length > 1) { const s = spread(bx); if (s > bs) { bs = s; bi = i; } } });
+    if (bi < 0) break;
+    const bx = boxes[bi];
+    let ax = 0, ex = -1;
+    for (let c = 0; c < 3; c++) { let lo = Infinity, hi = -Infinity; for (const i of bx) { lo = Math.min(lo, L[i][c]); hi = Math.max(hi, L[i][c]); } if (hi - lo > ex) { ex = hi - lo; ax = c; } }
+    bx.sort((p, q) => L[p][ax] - L[q][ax]);
+    let tot = 0; for (const i of bx) tot += wt[i];
+    let acc = 0, cut = 1;
+    for (let j = 0; j < bx.length - 1; j++) { acc += wt[bx[j]]; cut = j + 1; if (acc >= tot / 2) break; }
+    boxes.splice(bi, 1, bx.slice(0, cut), bx.slice(cut));
+  }
+  const cen = boxes.map(bx => {
+    let w = 0, m = [0, 0, 0]; for (const i of bx) { w += wt[i]; for (let c = 0; c < 3; c++) m[c] += wt[i] * L[i][c]; }
+    return m.map(v => v / w);
+  });
+  const near = p => { let b = 0, bd = Infinity; for (let j = 0; j < cen.length; j++) { const e = (p[0] - cen[j][0]) ** 2 + (p[1] - cen[j][1]) ** 2 + (p[2] - cen[j][2]) ** 2; if (e < bd) { bd = e; b = j; } } return b; };
+  const as = new Int32Array(n).fill(-1);
+  for (let it = 0; it < 30; it++) {
+    let moved = 0;
+    for (let i = 0; i < n; i++) { const j = near(L[i]); if (j !== as[i]) { as[i] = j; moved++; } }
+    if (!moved) break;
+    const sum = cen.map(() => [0, 0, 0, 0]);
+    for (let i = 0; i < n; i++) { const s = sum[as[i]]; s[3] += wt[i]; for (let c = 0; c < 3; c++) s[c] += wt[i] * L[i][c]; }
+    sum.forEach((s, j) => { if (s[3]) cen[j] = [s[0] / s[3], s[1] / s[3], s[2] / s[3]]; });
+  }
+  const pal = cen.map(c => lab2rgb(c[0], c[1], c[2]));
+  const map = new Map(); keys.forEach((k, i) => map.set(k, pal[as[i]]));
+  const used = new Set();
+  for (let i = 0; i < d.length; i += 4) {
+    if (!d[i + 3]) continue;
+    const p = map.get(d[i] << 16 | d[i + 1] << 8 | d[i + 2]);
+    d[i] = p[0]; d[i + 1] = p[1]; d[i + 2] = p[2];
+    used.add(p[0] << 16 | p[1] << 8 | p[2]);
+  }
+  return { from, to: used.size };
+}
+let colorStat = null;
 // crop the margin to the smallest rectangle and/or pad to a square
 function postProcess(data, W, H) {
   let x0 = 0, y0 = 0, x1 = W, y1 = H;
@@ -1132,8 +1217,11 @@ function postProcess(data, W, H) {
   if (bg) for (let i = 0; i < res.length; i += 4) res.set(bg, i);
   const ox = (w - cw) >> 1, oy = (h - ch) >> 1;
   for (let y = 0; y < ch; y++) res.set(cd.subarray(y * cw * 4, (y + 1) * cw * 4), ((y + oy) * w + ox) * 4);
+  colorStat = reduceColors(res, +$('colorLimit').value);
   return { data: res, w, h };
 }
+for (const o of $('colorLimit').options) if (+o.value) o.textContent = t('{0}色', o.value);
+$('colorLimit').addEventListener('change', schedule);
 $('crop').addEventListener('change', schedule);
 $('transBg').addEventListener('change', schedule);
 $('islandTrans').addEventListener('change', schedule);
@@ -1171,7 +1259,8 @@ function rebuild() {
   g.putImageData(new ImageData(fin.data, fin.w, fin.h), 0, 0);
   $('outInfo').textContent = `${fin.w}×${fin.h} px`;
   $('btnSave').disabled = $('btnPsd').disabled = $('btnCopy').disabled = false;
-  $('info').textContent = `${$('info').dataset.det || ''}${bgMsg ? '\n' + bgMsg : ''}\n${t('出力: {0}×{1} px', fin.w, fin.h)}${$('resizeOn').checked ? t('(リサイズ前 {0}×{1})', preSize.w, preSize.h) : ''}`;
+  $('info').textContent = `${$('info').dataset.det || ''}${bgMsg ? '\n' + bgMsg : ''}\n${t('出力: {0}×{1} px', fin.w, fin.h)}${$('resizeOn').checked ? t('(リサイズ前 {0}×{1})', preSize.w, preSize.h) : ''}
+${t('色数: {0} → {1}', colorStat.from, colorStat.to)}`;
   layoutOut();
   drawOverlay();
 }
@@ -1293,12 +1382,56 @@ $('btnPsd').onclick = () => {
 };
 
 // ---------- export ----------
-$('btnSave').onclick = () => {
-  outC.toBlob(b => {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(b); a.download = `${srcName || 'pixel'}_${outC.width}x${outC.height}.png`;
-    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  }, 'image/png');
+// indexed-colour PNG (PLTE + tRNS) for images of up to 256 colours; null when that is not possible
+const CRC_T = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+async function encodeIndexedPng(cv) {
+  if (typeof CompressionStream === 'undefined') return null;
+  const W = cv.width, H = cv.height, d = cv.getContext('2d').getImageData(0, 0, W, H).data;
+  const idx = new Map(), pal = [];
+  for (let i = 0; i < d.length; i += 4) {
+    const k = d[i + 3] ? (d[i] << 24 | d[i + 1] << 16 | d[i + 2] << 8 | d[i + 3]) >>> 0 : 0;
+    if (!idx.has(k)) { if (pal.length >= 256) return null; idx.set(k, pal.length); pal.push(k); }
+  }
+  pal.sort((a, b) => ((a & 255) === 255) - ((b & 255) === 255) || a - b);   // non-opaque entries first, so tRNS stays short
+  pal.forEach((k, i) => idx.set(k, i));
+  const n = pal.length, bits = n <= 2 ? 1 : n <= 4 ? 2 : n <= 16 ? 4 : 8, rb = Math.ceil(W * bits / 8);
+  const raw = new Uint8Array((rb + 1) * H);
+  for (let y = 0; y < H; y++) {
+    const o = y * (rb + 1) + 1;
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4, k = d[i + 3] ? (d[i] << 24 | d[i + 1] << 16 | d[i + 2] << 8 | d[i + 3]) >>> 0 : 0, v = idx.get(k);
+      raw[o + (x * bits >> 3)] |= v << (8 - bits - (x * bits & 7));
+    }
+  }
+  const z = await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer();
+  const chunks = [];
+  const chunk = (type, body) => {
+    const c = new Uint8Array(12 + body.length), v = new DataView(c.buffer);
+    v.setUint32(0, body.length);
+    for (let i = 0; i < 4; i++) c[4 + i] = type.charCodeAt(i);
+    c.set(body, 8);
+    let crc = 0xFFFFFFFF; for (let i = 4; i < 8 + body.length; i++) crc = CRC_T[(crc ^ c[i]) & 255] ^ (crc >>> 8);
+    v.setUint32(8 + body.length, (crc ^ 0xFFFFFFFF) >>> 0);
+    chunks.push(c);
+  };
+  const ihdr = new Uint8Array(13), hv = new DataView(ihdr.buffer);
+  hv.setUint32(0, W); hv.setUint32(4, H); ihdr[8] = bits; ihdr[9] = 3;
+  chunk('IHDR', ihdr);
+  const plte = new Uint8Array(n * 3), trns = [];
+  pal.forEach((k, i) => { plte[i * 3] = k >>> 24; plte[i * 3 + 1] = k >>> 16 & 255; plte[i * 3 + 2] = k >>> 8 & 255; if ((k & 255) !== 255) trns.push(k & 255); });
+  chunk('PLTE', plte);
+  if (trns.length) chunk('tRNS', Uint8Array.from(trns));
+  chunk('IDAT', new Uint8Array(z));
+  chunk('IEND', new Uint8Array(0));
+  return new Blob([Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10), ...chunks], { type: 'image/png' });
+}
+$('btnSave').onclick = async () => {
+  let b = null;
+  try { b = await encodeIndexedPng(outC); } catch (e) {}
+  if (!b) b = await new Promise(r => outC.toBlob(r, 'image/png'));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(b); a.download = `${srcName || 'pixel'}_${outC.width}x${outC.height}.png`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 };
 $('btnCopy').onclick = () => {
   outC.toBlob(async b => {
