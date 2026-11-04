@@ -93,7 +93,7 @@
   <div class="hint">AI生成画像のようにドット幅が揺れる場合は不均一。数値を手で変えると均一に切り替わります</div>
   <label class="chk"><input type="checkbox" id="outline1">輪郭を1ピクセルに寄せる</label>
   <div class="hint">読み込み時に自動判定します。ONだと暗い輪郭線の境目にグリッドを優先して合わせます</div>
-  <label class="chk"><input type="checkbox" id="square" checked>縦横を同じサイズにする(均一時)</label>
+  <label class="chk"><input type="checkbox" id="square" checked>縦横の平均サイズを同じにする</label>
   <div id="gridCtl"></div>
   <label class="chk"><input type="checkbox" id="showGrid" checked>元画像にグリッドを重ねる</label>
 
@@ -190,7 +190,7 @@ const T = {
   'AI生成画像のようにドット幅が揺れる場合は不均一。数値を手で変えると均一に切り替わります': { en: 'Use uneven when the dot size wobbles, as in AI-generated images. Editing the numbers switches to uniform.', ko: 'AI 생성 이미지처럼 도트 크기가 흔들리면 불균일을 사용하세요. 숫자를 직접 바꾸면 균일로 전환됩니다.', zh: '对于点大小不一致的 AI 生成图,请使用不均匀。手动修改数值会切换为均匀。' },
   '輪郭を1ピクセルに寄せる': { en: 'Snap to 1-pixel outline', ko: '윤곽을 1픽셀로 맞추기', zh: '将轮廓对齐为1像素' },
   '読み込み時に自動判定します。ONだと暗い輪郭線の境目にグリッドを優先して合わせます': { en: 'Detected automatically on load. When ON, the grid is fitted preferentially to the edges of dark outlines.', ko: '불러올 때 자동 판정합니다. ON이면 어두운 윤곽선의 경계에 그리드를 우선 맞춥니다.', zh: '载入时自动判定。开启后网格会优先贴合深色轮廓线的边界。' },
-  '縦横を同じサイズにする(均一時)': { en: 'Same width and height (uniform mode)', ko: '가로세로를 같은 크기로(균일 시)', zh: '宽高相同(均匀时)' },
+  '縦横の平均サイズを同じにする': { en: 'Same average width and height', ko: '가로세로 평균 크기를 같게', zh: '宽高平均大小相同' },
   '画像を左右反転する': { en: 'Flip image horizontally', ko: '이미지 좌우 반전', zh: '左右翻转图像' },
   '元画像も反転してから解析をやり直します': { en: 'The source is flipped too and the analysis restarts.', ko: '원본 이미지도 반전한 뒤 분석을 다시 시작합니다.', zh: '原图也会翻转，并重新开始分析。' },
   '元画像にグリッドを重ねる': { en: 'Overlay grid on source', ko: '원본 이미지에 그리드 겹치기', zh: '在原图上叠加网格' },
@@ -335,7 +335,10 @@ $('gridMode').addEventListener('change', () => {
   if (grid && $('gridMode').value !== 'uniform') { applyWarp(); schedule(); } else autoDetect('keep');
 });
 $('outline1').addEventListener('change', () => autoDetect('keep'));
-$('square').addEventListener('change', () => { if ($('square').checked) { setP('ph', P.pw); schedule(); } });
+$('square').addEventListener('change', () => {
+  if ($('gridMode').value !== 'uniform' && img) { autoDetect('keep', curPick); return; }
+  if ($('square').checked) { setP('ph', P.pw); schedule(); }
+});
 $('showGrid').addEventListener('change', drawOverlay);
 $('zoom').addEventListener('change', layoutOut);
 
@@ -701,7 +704,8 @@ function fitBounds(e, p, cp) {
   return b;
 }
 const r2 = v => Math.round(v * 100) / 100;
-const MAX_RATIO = 1.35;
+const MAX_RATIO = 1.5;   // hard limit of the dot aspect ratio
+const SQUARE_PULL = 1.2;   // ratios below this are pulled to 1:1
 // candidate dot sizes from the different measurements; the first one is what the auto detection uses
 let cands = [], bestCand = null;   // bestCand = the most likely one (selected by default)
 function buildCands() {
@@ -740,8 +744,11 @@ function renderCands(sel) {
   });
   $('candHint').textContent = cands.length > 1 ? `${t('解析候補(押すとそのドットサイズで再解析)')} ★=${t('有力')}: ${cands.map((c, i) => 'ABCD'[i] + '=' + c.name).join(' / ')}` : '';
 }
+let curPick = null;   // candidate chosen by the user (null = the most likely one)
 function autoDetect(force, pick) {
   if (!img) return;
+  curPick = pick && typeof pick === 'object' && 'px' in pick ? pick : null;
+  pick = curPick;
   if (force !== 'keep') {
     outlineW = 1;
     const ex0 = edgeProfile(true), ey0 = edgeProfile(false);
@@ -754,7 +761,8 @@ function autoDetect(force, pick) {
   renderCands(Math.max(0, cands.indexOf(use)));
   if ($('gridMode').value !== 'uniform') {
     const ex = edgeProfile(true), ey = edgeProfile(false);
-    const px = use.px, py = use.py;
+    let px = use.px, py = use.py;
+    if (px && py && Math.max(px, py) < Math.min(px, py) * SQUARE_PULL) px = py = Math.sqrt(px * py);
     if (px >= 2) {
       const cpx = cutProfile(true), cpy = cutProfile(false);
       const av = b => (b[b.length - 1] - b[0]) / (b.length - 1);
@@ -762,6 +770,22 @@ function autoDetect(force, pick) {
       // dots are never more than 1.35:1 (or 1:1.35); the axis that found a multiple of the pitch follows the other
       if (av(grid.x) > av(grid.y) * MAX_RATIO) grid.x = dpBounds(ex, av(grid.y), cpx);
       else if (av(grid.y) > av(grid.x) * MAX_RATIO) grid.y = dpBounds(ey, av(grid.x), cpy);
+      {   // pull towards 1:1: refit both axes around the common pitch and keep it when the ratio gets closer to 1
+        const rt = () => Math.max(av(grid.x), av(grid.y)) / Math.min(av(grid.x), av(grid.y));
+        if (rt() > 1.05) {
+          const gm = Math.sqrt(av(grid.x) * av(grid.y)), old = { x: grid.x, y: grid.y }, r0 = rt();
+          grid.x = dpBounds(ex, gm, cpx); grid.y = dpBounds(ey, gm, cpy);
+          if (!(rt() < r0)) { grid.x = old.x; grid.y = old.y; }
+        }
+      }
+      if ($('square').checked) {   // equal average width and height: refit both around the common pitch
+        const tg = (av(grid.x) + av(grid.y)) / 2;
+        for (const [ax, e, cp] of [['x', ex, cpx], ['y', ey, cpy]]) {
+          let q = tg, best = grid[ax];
+          for (let it = 0; it < 8 && Math.abs(av(best) / tg - 1) > 0.003; it++) { q *= tg / av(best); best = dpBounds(e, q, cp); }
+          if (Math.abs(av(best) / tg - 1) < Math.abs(av(grid[ax]) / tg - 1)) grid[ax] = best;
+        }
+      }
       grid.Ev = bandEdges(true, grid.y); grid.Eh = bandEdges(false, grid.x);
       grid.Cv = bandEdges(true, grid.y, true); grid.Ch = bandEdges(false, grid.x, true);
       applyWarp();
@@ -782,7 +806,7 @@ function autoDetect(force, pick) {
   let pw = bx.p, ph = by.p;
   const sq = $('square').checked;
   const bad = pw > ph * MAX_RATIO || ph > pw * MAX_RATIO;
-  if (sq || bad) {
+  if (sq || bad || Math.max(pw, ph) < Math.min(pw, ph) * SQUARE_PULL) {
     // use the more reliable axis (the finer one when the ratio is implausible) for the size, then re-fit the offset of the other
     const src = bad ? (pw < ph ? bx : by) : bx.score >= by.score ? bx : by;
     pw = ph = src.p;
