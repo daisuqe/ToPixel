@@ -113,6 +113,7 @@
   <div class="hint">余白は透明部分(透明が無ければ左上の色)を基準に判定します</div>
   <label class="chk"><input type="checkbox" id="resizeOn">強制リサイズ(輪郭を保って塗りを伸縮)</label>
   <div class="ctl"><div class="inp">幅 <input type="number" id="rw" min="1" max="2048"> 高さ <input type="number" id="rh" min="1" max="2048"></div></div>
+  <label class="chk"><input type="checkbox" id="keepRatio" checked>縦横比を保持する</label>
   <div class="hint" id="rInfo">暗い輪郭ピクセルは削らず、塗りの部分から縦横のシームを削除/複製して目標サイズに合わせます。切り取りの後・正方形化の前に適用します。</div>
   <div class="ctl"><label><span>減色(使う色数の上限)</span></label>
     <select id="colorLimit" style="width:100%;background:#181a1f;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px">
@@ -175,6 +176,9 @@ const T = {
   '{0}色': { en: '{0} colours', ko: '{0}색', zh: '{0}色' },
   'k-means法で代表色にまとめます(初期値はメディアンカット、Lab色空間)。小さな差し色が消えにくいよう、色の面積は平方根で重みづけします。透明は数えません': { en: 'Merges colours into representative ones with k-means (median-cut start, Lab space). Colour areas are weighted by their square root so small accent colours survive. Transparent pixels are not counted.', ko: 'k-means로 대표색으로 합칩니다(초기값은 메디안 컷, Lab 색공간). 작은 포인트 색이 남도록 면적은 제곱근으로 가중합니다. 투명은 세지 않습니다.', zh: '用 k-means 合并为代表色(以中位切分为初值,Lab 色彩空间)。面积按平方根加权,以保留小面积点缀色。透明不计入。' },
   '色数: {0} → {1}': { en: 'Colours: {0} → {1}', ko: '색 수: {0} → {1}', zh: '颜色数: {0} → {1}' },
+  '等倍': { en: 'Native (1:1)', ko: '등배(1:1)', zh: '原始大小(1:1)' },
+  '検出: 等倍(1ドット=1px)のため、そのまま出力します': { en: 'Detected: already 1 dot = 1 px, output as is', ko: '감지: 이미 1도트=1px이므로 그대로 출력합니다', zh: '检测:已是 1 点=1 像素,按原样输出' },
+  '縦横比を保持する': { en: 'Keep aspect ratio', ko: '가로세로 비율 유지', zh: '保持纵横比' },
   '総合': { en: 'Combined', ko: '종합', zh: '综合' },
   '塗りの段差幅': { en: 'Colour step width', ko: '색 단차 폭', zh: '色块台阶宽度' },
   '輪郭線の太さ': { en: 'Outline thickness', ko: '윤곽선 두께', zh: '轮廓线粗细' },
@@ -422,7 +426,7 @@ function edgeProfile(horizontal) {
 }
 // fraction of the samples along each line x where the line would cut through a dark stroke
 // (dark on both sides); null unless the 1px-outline mode is on
-const CUT_W = 4;
+const CUT_W = 0;   // penalty for grid lines cutting through dark strokes (off: it pulled the pitch off on some images)
 function cutProfile(horizontal) {
   if (outlineW === 1) return null;
   const { w, h } = img;
@@ -461,7 +465,7 @@ function detectAxis(e0, cp, hint) {
   const mean = tot / (n - 1);
   if (mean <= 0) return { p: 8, off: 0, score: 0 };
   let best = { s: -1, p: 0, o: 0 };
-  const pLo = hint ? hint * 0.9 : 2, pHi = hint ? hint * 1.1 : Math.min(128, n / 12);   // hint = autocorrelation pitch
+  const pLo = hint ? hint * 0.94 : 2, pHi = hint ? hint * 1.06 : Math.min(128, n / 12);   // hint = autocorrelation pitch
   for (let p = pLo; p <= pHi; p += Math.max(0.002, 0.1 * p * p / n)) {
     const [s, o] = bestOffset(e, mean, p, 0.5, cp);
     if (s > best.s) best = { s, p, o };
@@ -598,7 +602,8 @@ function dpBounds(e, p0, cp) {
   return b;
 }
 // masked colour difference between two pixel offsets (transparent colour is ignored)
-let dark = null, outlineW = 1, darkThr = 0;   // dark = outline-coloured pixel mask
+let lineCache = null;   // thickness map + skeleton of the outline mask (computed once per image)
+let dark = null, dark2 = null, outlineW = 1, darkThr = 0, darkThr2 = 0;   // dark2 / darkThr2: the stricter mask of the real outline (not dark shading)   // dark = outline-coloured pixel mask
 function pd(i, k) {
   const d = img.data, ai = d[i + 3], aj = d[k + 3], mi = ai ? 1 : 0, mj = aj ? 1 : 0;
   const v = Math.abs(d[i] * mi - d[k] * mj) + Math.abs(d[i + 1] * mi - d[k + 1] * mj) + Math.abs(d[i + 2] * mi - d[k + 2] * mj) + Math.abs(ai - aj);
@@ -610,11 +615,14 @@ function computeDark() {
   let n = 0;
   for (let i = 0; i < w * h; i++) if (data[i * 4 + 3] >= 128) { hist[lum(i * 4)]++; n++; }
   dark = new Uint8Array(w * h);
+  dark2 = new Uint8Array(w * h);
+  lineCache = null;
   if (!n) return;
   let acc = 0, p5 = 0;
   for (; p5 < 255; p5++) { acc += hist[p5]; if (acc >= n * 0.05) break; }
   const thr = darkThr = Math.min(p5 + 30, 100);
-  for (let i = 0; i < w * h; i++) if (data[i * 4 + 3] >= 128 && lum(i * 4) <= thr) dark[i] = 1;
+  darkThr2 = Math.min(thr, p5 + 15);
+  for (let i = 0; i < w * h; i++) if (data[i * 4 + 3] >= 128) { const l = lum(i * 4); if (l <= thr) dark[i] = 1; if (l <= darkThr2) dark2[i] = 1; }
 }
 // true when the dark strokes are about one dot wide (typical 1px outline)
 function judgeOutline(p) {
@@ -667,24 +675,34 @@ function refineLines(base, E, frac, C) {
   m = m / c || 1;
   const pos = [];
   for (let i = 0; i < K; i++) {
-    const row = new Float64Array(M), b = base[i];
+    const row = new Float64Array(M), b = base[i], bi = Math.round(b);
     if (b <= 0 || b >= n || L < 1) row.fill(b);
-    else for (let j = 0; j < M; j++) {
-      const j0 = Math.max(0, j - R), j1 = Math.min(M - 1, j + R), cnt = j1 - j0 + 1;
-      let best = -Infinity, bd = 0;
-      for (let d = -L; d <= L; d++) {
-        const x = b + d; if (x < 1 || x >= n) continue;
-        let s = 0, u = 0; for (let k = j0; k <= j1; k++) { s += E[k][x]; if (C) u += C[k][x]; }
-        s = s / m - 1.2 * cnt * (d / L) * (d / L) - CUT_W * u;
-        if (s > best) { best = s; bd = d; }
+    else {
+      // the offset may change by at most a quarter of the tolerance from one band to the next (Viterbi over the bands)
+      const D = 2 * L + 1, S = Math.max(1, L >> 2);
+      const dp = Array.from({ length: M }, () => new Float64Array(D).fill(-Infinity)), from = Array.from({ length: M }, () => new Int16Array(D));
+      for (let j = 0; j < M; j++) {
+        const j0 = Math.max(0, j - R), j1 = Math.min(M - 1, j + R), cnt = j1 - j0 + 1;
+        for (let di = 0; di < D; di++) {
+          const d = di - L, x = bi + d; if (x < 1 || x >= n) continue;
+          let s = 0, u = 0; for (let k = j0; k <= j1; k++) { s += E[k][x]; if (C) u += C[k][x]; }
+          s = s / m - 1.2 * cnt * (d / L) * (d / L) - CUT_W * u;
+          if (j === 0) { dp[0][di] = s; continue; }
+          let pb = -Infinity, pi = -1;
+          for (let q = Math.max(0, di - S); q <= Math.min(D - 1, di + S); q++) if (dp[j - 1][q] > pb) { pb = dp[j - 1][q]; pi = q; }
+          if (pi >= 0) { dp[j][di] = pb + s; from[j][di] = pi; }
+        }
       }
-      row[j] = b + bd;
+      let bi2 = 0; for (let di = 1; di < D; di++) if (dp[M - 1][di] > dp[M - 1][bi2]) bi2 = di;
+      if (dp[M - 1][bi2] === -Infinity) row.fill(b);
+      else for (let j = M - 1; j >= 0; j--) { row[j] = bi + bi2 - L; bi2 = from[j][bi2]; }
     }
     pos.push(row);
   }
-  for (let j = 0; j < M; j++) for (let i = 1; i < K; i++) {   // keep the order of the lines
+  for (let j = 0; j < M; j++) for (let i = 1; i < K; i++) {   // keep the order of the lines and the cell width within 0.75-1.25 pitch
     if (base[i] <= 0 || base[i] >= n) continue;
-    pos[i][j] = Math.max(pos[i][j], pos[i - 1][j] + 0.5 * p);
+    const lo = Math.max(base[i] - L, pos[i - 1][j] + 0.75 * p), hi = Math.min(base[i] + L, pos[i - 1][j] + 1.25 * p);
+    pos[i][j] = lo <= hi ? Math.min(hi, Math.max(lo, pos[i][j])) : Math.max(pos[i - 1][j] + 0.5 * p, (lo + hi) / 2);
   }
   return pos;
 }
@@ -706,9 +724,32 @@ function fitBounds(e, p, cp) {
 const r2 = v => Math.round(v * 100) / 100;
 const MAX_RATIO = 1.5;   // hard limit of the dot aspect ratio
 const SQUARE_PULL = 1.2;   // ratios below this are pulled to 1:1
+// share of the pixels that lie in colour runs of at most 3 px: about 0.5 for art that is already 1 dot = 1 px, near 0 for enlarged art
+function nativeShare() {
+  const { w, h, data } = img;
+  let tot = 0, short = 0;
+  const scan = (len, at) => {
+    let st = 0;
+    for (let a = 1; a <= len; a++) {
+      let diff = false;
+      if (a < len) {
+        const i = at(a) * 4, j = at(a - 1) * 4;
+        diff = Math.abs(data[i] - data[j]) + Math.abs(data[i + 1] - data[j + 1]) + Math.abs(data[i + 2] - data[j + 2]) + Math.abs(data[i + 3] - data[j + 3]) > 48;
+      }
+      if (a === len || diff) { const L = a - st; tot += L; if (L <= 3) short += L; st = a; }
+    }
+  };
+  for (let y = 0; y < h; y += 2) scan(w, a => y * w + a);
+  for (let x = 0; x < w; x += 2) scan(h, a => a * w + x);
+  return tot ? short / tot : 0;
+}
 // candidate dot sizes from the different measurements; the first one is what the auto detection uses
 let cands = [], bestCand = null;   // bestCand = the most likely one (selected by default)
 function buildCands() {
+  if (nativeShare() >= 0.2) {   // already 1 dot = 1 px: nothing to scale back
+    bestCand = { name: t('等倍'), px: 1, py: 1 };
+    return [bestCand];
+  }
   const ex = edgeProfile(true), ey = edgeProfile(false);
   const both = (a, b) => [a || b, b || a];
   const [rx, ry] = both(runPitch(true), runPitch(false));
@@ -718,10 +759,10 @@ function buildCands() {
   const list = [];
   const add = (name, px, py) => {
     if (!(px >= 2 && py >= 2)) return;
-    if (list.some(c => Math.abs(c.px / px - 1) < 0.08 && Math.abs(c.py / py - 1) < 0.08)) return;
+    if (list.some(c => Math.abs(c.px / px - 1) < 0.03 && Math.abs(c.py / py - 1) < 0.03)) return;
     list.push({ name, px, py });
   };
-  if (outlineW > 1 && ox) add(t('総合'), ox, oy); else add(t('総合'), bx, by);
+  add(t('総合'), bx, by);
   add(t('塗りの段差幅'), rx, ry);
   add(t('輪郭線の太さ'), ox, oy);
   add(t('エッジの周期'), ax, ay);
@@ -753,12 +794,20 @@ function autoDetect(force, pick) {
     outlineW = 1;
     const ex0 = edgeProfile(true), ey0 = edgeProfile(false);
     const p0 = ((estimatePitch(ex0) || 0) + (estimatePitch(ey0) || 0)) / 2;
-    $('outline1').checked = judgeOutline(p0);
+    $('outline1').checked = nativeShare() < 0.2 && judgeOutline(p0);
   }
   outlineW = $('outline1').checked ? 3 : 1;
   if (!pick) cands = buildCands();
   const use = pick || bestCand || { px: 0, py: 0 };
   renderCands(Math.max(0, cands.indexOf(use)));
+  if (use.px === 1 && use.py === 1) {   // 1:1: take the image as it is
+    outlineW = 1; $('outline1').checked = false;
+    grid = null;
+    setP('pw', 1); setP('ph', 1); gridChanged(); setP('ox', 0); setP('oy', 0);
+    $('info').dataset.det = t('検出: 等倍(1ドット=1px)のため、そのまま出力します');
+    schedule();
+    return;
+  }
   if ($('gridMode').value !== 'uniform') {
     const ex = edgeProfile(true), ey = edgeProfile(false);
     let px = use.px, py = use.py;
@@ -788,11 +837,18 @@ function autoDetect(force, pick) {
       }
       grid.Ev = bandEdges(true, grid.y); grid.Eh = bandEdges(false, grid.x);
       grid.Cv = bandEdges(true, grid.y, true); grid.Ch = bandEdges(false, grid.x, true);
+      if ($('square').checked) {   // make the average width and height exactly equal (scaled about the centre of each axis)
+        const tg = (av(grid.x) + av(grid.y)) / 2;
+        for (const ax of ['x', 'y']) {
+          const b = grid[ax], c = (b[0] + b[b.length - 1]) / 2, k = tg / av(b);
+          grid[ax] = b.map(v => c + (v - c) * k);
+        }
+      }
       applyWarp();
       const avg = b => (b[b.length - 1] - b[0]) / (b.length - 1);
       const pw = avg(grid.x), ph = avg(grid.y);
       setP('pw', r2(pw)); setP('ph', r2(ph)); syncMax();
-      setP('ox', r2(grid.x[0] % pw)); setP('oy', r2(grid.y[0] % ph));
+      setP('ox', r2((grid.x[0] % pw + pw) % pw)); setP('oy', r2((grid.y[0] % ph + ph) % ph));
       $('info').dataset.det = t('検出: 平均 {0}×{1}px(不均一){2}', r2(pw), r2(ph), outlineW > 1 ? t(' 輪郭1px') : '');
       schedule();
       return;
@@ -801,7 +857,9 @@ function autoDetect(force, pick) {
   grid = null;
   const cpx = cutProfile(true), cpy = cutProfile(false);
   const ex1 = edgeProfile(true), ey1 = edgeProfile(false);
-  const hx = use.px, hy = use.py;
+  // start from the pitch the uneven-grid fit settles on, which is more exact than the raw measurement
+  const fitAv = (e, p, cp) => { if (!(p >= 2)) return p; const b = fitBounds(e, p, cp); return b.length > 3 ? (b[b.length - 1] - b[0]) / (b.length - 1) : p; };
+  const hx = fitAv(ex1, use.px, cpx), hy = fitAv(ey1, use.py, cpy);
   const bx = detectAxis(ex1, cpx, hx >= 2 ? hx : 0), by = detectAxis(ey1, cpy, hy >= 2 ? hy : 0);
   let pw = bx.p, ph = by.p;
   const sq = $('square').checked;
@@ -878,6 +936,39 @@ function cellColor(x0, y0, x1, y1, t, m) {
   return [Math.round(c[0]), Math.round(c[1]), Math.round(c[2]), alpha >= 128 ? 255 : 0];
 }
 
+// Cells next to an outline cell whose area holds at least EDGE_MIN of source outline pixels become outline too (TIP_MIN when
+// they continue the end of a line), so that thin tips (fingers, spikes) narrower than a dot are not lost; nothing is drawn
+// where the source has no outline
+const EDGE_MIN = 0.3, TIP_MIN = 0.15;   // TIP_MIN: lower limit for cells that continue the end of a line
+function addEdgeCells(d, rects, W, H) {
+  const { w, h, data } = img;
+  const isO = i => d[i * 4 + 3] > 0 && lumAt(d, i * 4) <= darkThr2;
+  const nOut = (x, y) => { let c = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const X = x + dx, Y = y + dy; if ((dx || dy) && X >= 0 && Y >= 0 && X < W && Y < H && isO(Y * W + X)) c++; } return c; };
+  for (let pass = 0; pass < 3; pass++) {
+    const add = [];
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      if (isO(i)) continue;
+      let near = false, tip = false;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const X = x + dx, Y = y + dy;
+        if ((dx || dy) && X >= 0 && Y >= 0 && X < W && Y < H && isO(Y * W + X)) { near = true; if (nOut(X, Y) <= 1) tip = true; }
+      }
+      if (!near) continue;
+      const r = rects[i], x0 = Math.max(0, Math.floor(r[0])), x1 = Math.min(w, Math.ceil(r[2])), y0 = Math.max(0, Math.floor(r[1])), y1 = Math.min(h, Math.ceil(r[3]));
+      const area = (x1 - x0) * (y1 - y0);
+      if (area <= 0) continue;
+      let n = 0, sr = 0, sg = 0, sb = 0;
+      for (let yy = y0; yy < y1; yy++) for (let xx = x0; xx < x1; xx++) {
+        const k = yy * w + xx;
+        if (dark2[k]) { n++; sr += data[k * 4]; sg += data[k * 4 + 1]; sb += data[k * 4 + 2]; }
+      }
+      if (n / area >= (tip ? TIP_MIN : EDGE_MIN)) add.push([i, Math.round(sr / n), Math.round(sg / n), Math.round(sb / n)]);
+    }
+    if (!add.length) break;
+    for (const [i, r, g, b] of add) { d[i * 4] = r; d[i * 4 + 1] = g; d[i * 4 + 2] = b; d[i * 4 + 3] = 255; }
+  }
+}
 // ---------- 1px outline enforcement ----------
 // Two neighbouring outline cells whose source strokes together are only about one dot wide are one
 // stroke split by the grid: keep the cell holding more of it and give the other its outer neighbour's colour.
@@ -926,8 +1017,227 @@ function thinOutline(d, rects, W, H, S = { w: img.w, h: img.h, dark }, thr = dar
       }
     }
   }
+  // strokes still two cells thick (and longer than that) are cut down to one cell, keeping the line connected
+  const RING = [[0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1]];
+  const M = new Uint8Array(W * H);
+  const thr2 = Math.min(thr, darkThr2 || thr);
+  for (let i = 0; i < W * H; i++) M[i] = d[i * 4 + 3] > 0 && lumAt(d, i * 4) <= thr2 ? 1 : 0;
+  const get = (x, y) => x >= 0 && y >= 0 && x < W && y < H ? M[y * W + x] : 0;
+  const run = (x, y, dx, dy) => { let n = 1; for (let k = 1; get(x + dx * k, y + dy * k); k++) n++; for (let k = 1; get(x - dx * k, y - dy * k); k++) n++; return n; };
+  const comps = (cells, adj) => {   // number of connected groups among ring cells
+    const par = cells.map((_, i) => i), f = i => par[i] === i ? i : (par[i] = f(par[i]));
+    for (let i = 0; i < cells.length; i++) for (let j = i + 1; j < cells.length; j++) if (adj(cells[i], cells[j])) par[f(i)] = f(j);
+    return new Set(cells.map((_, i) => f(i))).size;
+  };
+  const simple = (x, y) => {
+    const fg = [], bg = [];
+    RING.forEach((r, k) => (get(x + r[0], y + r[1]) ? fg : bg).push(r));
+    if (fg.length < 2 || comps(fg, (p, q) => Math.max(Math.abs(p[0] - q[0]), Math.abs(p[1] - q[1])) <= 1) !== 1) return false;
+    const groups = bg.filter(r => r[0] === 0 || r[1] === 0);
+    if (!groups.length) return true;
+    // 4-connected bg groups that touch a 4-neighbour of the centre must be a single one
+    const par = bg.map((_, i) => i), f = i => par[i] === i ? i : (par[i] = f(par[i]));
+    for (let i = 0; i < bg.length; i++) for (let j = i + 1; j < bg.length; j++) if (Math.abs(bg[i][0] - bg[j][0]) + Math.abs(bg[i][1] - bg[j][1]) === 1) par[f(i)] = f(j);
+    return new Set(bg.map((r, i) => (r[0] === 0 || r[1] === 0) ? f(i) : -1).filter(v => v >= 0)).size === 1;
+  };
+  for (let pass = 0; pass < 3; pass++) {
+    const cand = [];
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (M[y * W + x]) {
+      const rh = run(x, y, 1, 0), rv = run(x, y, 0, 1);
+      if (Math.min(rh, rv) === 2 && Math.max(rh, rv) >= 3) cand.push([count(rects[y * W + x]), x, y]);
+    }
+    if (!cand.length) break;
+    cand.sort((p, q) => p[0] - q[0]);
+    let changed = 0;
+    for (const [, x, y] of cand) {
+      if (!M[y * W + x]) continue;
+      const rh = run(x, y, 1, 0), rv = run(x, y, 0, 1);
+      if (Math.min(rh, rv) !== 2 || Math.max(rh, rv) < 3 || !simple(x, y)) continue;
+      const thinAxis = rh === 2 ? [[1, 0], [-1, 0]] : [[0, 1], [0, -1]];   // the axis along which the stroke is two cells wide
+      let from = -1;
+      for (const [dx, dy] of thinAxis) if (get(x + dx, y + dy) && !get(x - dx, y - dy) && x - dx >= 0 && y - dy >= 0 && x - dx < W && y - dy < H) from = (y - dy) * W + x - dx;
+      if (from < 0) for (const r of RING) if (!get(x + r[0], y + r[1]) && x + r[0] >= 0 && y + r[1] >= 0 && x + r[0] < W && y + r[1] < H) { from = (y + r[1]) * W + x + r[0]; break; }
+      if (from < 0) continue;
+      d.copyWithin((y * W + x) * 4, from * 4, from * 4 + 4);
+      M[y * W + x] = 0; changed++;
+    }
+    if (!changed) break;
+  }
+  // a line that jogs aside for a single cell (the cells before and after it agree) is moved back into line
+  const swapCells = (x1, y1, x2, y2, ox, oy) => {   // outline moves (x1,y1) -> (x2,y2); (x1,y1) takes the colour of its outer neighbour (ox,oy)
+    const i = (y1 * W + x1) * 4, j = (y2 * W + x2) * 4;
+    d.copyWithin(j, i, i + 4);
+    if (ox >= 0 && oy >= 0 && ox < W && oy < H) d.copyWithin(i, (oy * W + ox) * 4, (oy * W + ox) * 4 + 4); else d[i + 3] = 0;
+    M[y1 * W + x1] = 0; M[y2 * W + x2] = 1;
+  };
+  for (const [ax, ay] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {   // (ax, ay): direction from the jogged cell to the line
+    const px = ay, py = ax;   // along the line
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      if (!M[y * W + x]) continue;
+      const lx = x + ax, ly = y + ay;
+      if (get(lx, ly) || lx < 0 || ly < 0 || lx >= W || ly >= H) continue;
+      if (get(x + px, y + py) || get(x - px, y - py)) continue;
+      if (!(get(lx + px, ly + py) && get(lx - px, ly - py))) continue;
+      swapCells(x, y, lx, ly, x - ax, y - ay);
+    }
+  }
+  // one-cell bumps sticking out sideways from a line (their only dark neighbours are the host cell and its two sides)
+  const cnt8 = (x, y) => { let c = 0; for (const r of RING) c += get(x + r[0], y + r[1]); return c; };
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (!M[y * W + x]) continue;
+    const v = RING.map(r => get(x + r[0], y + r[1]));
+    for (const c of [0, 2, 4, 6]) {
+      if (!v[c]) continue;
+      if (v.some((on, k) => on && k !== c && k !== (c + 7) % 8 && k !== (c + 1) % 8)) continue;
+      if (cnt8(x + RING[c][0], y + RING[c][1]) < 3) continue;   // the host must be part of a line, not its end
+      const o = RING[(c + 4) % 8], ox = x + o[0], oy = y + o[1];
+      if (ox < 0 || oy < 0 || ox >= W || oy >= H || M[oy * W + ox]) continue;
+      d.copyWithin((y * W + x) * 4, (oy * W + ox) * 4, (oy * W + ox) * 4 + 4);
+      M[y * W + x] = 0;
+      break;
+    }
+  }
+  // two-cell spurs: an end cell whose neighbour has just one other neighbour, which sits on a line (a junction)
+  const nbrOf = (x, y, not) => { for (const r of RING) { const X = x + r[0], Y = y + r[1]; if (get(X, Y) && !(not && X === not[0] && Y === not[1])) return [X, Y]; } return null; };
+  const wipe = (x, y) => {
+    for (const r of RING) {
+      const ox = x + r[0], oy = y + r[1];
+      if (ox >= 0 && oy >= 0 && ox < W && oy < H && !M[oy * W + ox]) { d.copyWithin((y * W + x) * 4, (oy * W + ox) * 4, (oy * W + ox) * 4 + 4); M[y * W + x] = 0; return; }
+    }
+  };
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (!M[y * W + x] || cnt8(x, y) !== 1) continue;
+    const n1 = nbrOf(x, y);
+    if (!n1 || cnt8(n1[0], n1[1]) !== 2) continue;
+    const n2 = nbrOf(n1[0], n1[1], [x, y]);
+    if (!n2 || cnt8(n2[0], n2[1]) < 4) continue;
+    wipe(x, y); wipe(n1[0], n1[1]);
+  }
 }
 
+// ---------- outline as lines ----------
+// The strokes of the real outline mask (dark2) are reduced to their centre lines (Zhang-Suen skeleton); a cell is an outline
+// cell when a centre line passes through it, so smooth strokes stay connected and smooth when they shrink to one dot.
+// Thick dark areas (pupils, solid black) are not lines and keep being handled per cell.
+function ensureLines() {
+  if (lineCache) return lineCache;
+  const { w, h } = img, m = dark2;
+  const thick = new Uint16Array(w * h);
+  for (let y = 0; y < h; y++) {
+    let x = 0;
+    while (x < w) {
+      if (!m[y * w + x]) { x++; continue; }
+      let e = x; while (e < w && m[y * w + e]) e++;
+      for (let k = x; k < e; k++) thick[y * w + k] = e - x;
+      x = e;
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let y = 0;
+    while (y < h) {
+      if (!m[y * w + x]) { y++; continue; }
+      let e = y; while (e < h && m[e * w + x]) e++;
+      for (let k = y; k < e; k++) thick[k * w + x] = Math.min(thick[k * w + x], e - y);
+      y = e;
+    }
+  }
+  // Zhang-Suen thinning over the list of mask pixels
+  const a = Uint8Array.from(m);
+  let act = []; for (let i = 0; i < w * h; i++) if (a[i]) act.push(i);
+  for (let changed = true; changed;) {
+    changed = false;
+    for (let sub = 0; sub < 2; sub++) {
+      const del = [];
+      for (const i of act) {
+        const x = i % w, y = (i / w) | 0;
+        if (x < 1 || y < 1 || x >= w - 1 || y >= h - 1) continue;
+        const p = [a[i - w], a[i - w + 1], a[i + 1], a[i + w + 1], a[i + w], a[i + w - 1], a[i - 1], a[i - w - 1]];   // P2..P9
+        const B = p[0] + p[1] + p[2] + p[3] + p[4] + p[5] + p[6] + p[7];
+        if (B < 2 || B > 6) continue;
+        let A = 0; for (let k = 0; k < 8; k++) if (!p[k] && p[(k + 1) % 8]) A++;
+        if (A !== 1) continue;
+        if (sub === 0 ? (p[0] * p[2] * p[4] || p[2] * p[4] * p[6]) : (p[0] * p[2] * p[6] || p[0] * p[4] * p[6])) continue;
+        del.push(i);
+      }
+      if (del.length) { changed = true; for (const i of del) a[i] = 0; act = act.filter(i => a[i]); }
+    }
+  }
+  return lineCache = { thick, skel: act };
+}
+// rebuild the outline cells of d (W x H) from the centre lines; rects = source rectangle of every cell
+function lineOutline(d, rects, W, H) {
+  const { w, h, data } = img, { thick, skel } = ensureLines();
+  const N = W * H;
+  let ps = 0; const ns = Math.min(N, 200);
+  for (let i = 0; i < ns; i++) ps += ((rects[i][2] - rects[i][0]) + (rects[i][3] - rects[i][1])) / 2;
+  const LIM = 1.9 * ps / ns;
+  // source pixel -> cell
+  const cellOf = new Int32Array(w * h).fill(-1);
+  for (let c = 0; c < N; c++) {
+    const r = rects[c];
+    for (let y = Math.max(0, Math.floor(r[1])); y < Math.min(h, Math.ceil(r[3])); y++)
+      for (let x = Math.max(0, Math.floor(r[0])); x < Math.min(w, Math.ceil(r[2])); x++) cellOf[y * w + x] = c;
+  }
+  const line = new Uint16Array(N), thickCnt = new Uint32Array(N), area = new Uint32Array(N), sn = new Uint32Array(N);
+  const sr = new Float64Array(N), sg = new Float64Array(N), sb = new Float64Array(N);
+  for (let i = 0; i < w * h; i++) {
+    const c = cellOf[i]; if (c < 0) continue;
+    area[c]++;
+    if (dark2[i]) { sr[c] += data[i * 4]; sg[c] += data[i * 4 + 1]; sb[c] += data[i * 4 + 2]; sn[c]++; if (thick[i] > LIM) thickCnt[c]++; }
+  }
+  for (const i of skel) { const c = cellOf[i]; if (c >= 0 && thick[i] <= LIM) line[c]++; }
+  const M = new Uint8Array(N), blob = new Uint8Array(N);
+  for (let c = 0; c < N; c++) {
+    if (area[c] && thickCnt[c] >= 0.25 * area[c]) { blob[c] = 1; M[c] = 1; }
+    else if (line[c]) M[c] = 1;
+  }
+  const get = (x, y) => x >= 0 && y >= 0 && x < W && y < H ? M[y * W + x] : 0;
+  const RING = [[0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1]];
+  const cnt8 = (x, y) => { let c = 0; for (const r of RING) c += get(x + r[0], y + r[1]); return c; };
+  const groups = (cells, adj) => {
+    const par = cells.map((_, i) => i), f = i => par[i] === i ? i : (par[i] = f(par[i]));
+    for (let i = 0; i < cells.length; i++) for (let j = i + 1; j < cells.length; j++) if (adj(cells[i], cells[j])) par[f(i)] = f(j);
+    return cells.map((_, i) => f(i));
+  };
+  const simple = (x, y) => {
+    const fg = [], bg = [];
+    for (const r of RING) (get(x + r[0], y + r[1]) ? fg : bg).push(r);
+    if (fg.length < 2 || new Set(groups(fg, (a, b) => Math.max(Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1])) <= 1)).size !== 1) return false;
+    const g = groups(bg, (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) === 1);
+    return new Set(bg.map((r, i) => (r[0] === 0 || r[1] === 0) ? g[i] : -1).filter(v => v >= 0)).size <= 1;
+  };
+  // thin the line cells down to a one-cell-wide, connected path: weakest cells first, never breaking the line or shortening its ends
+  const order = []; for (let c = 0; c < N; c++) if (M[c] && !blob[c]) order.push(c);
+  order.sort((a, b) => line[a] - line[b]);
+  for (const c of order) {
+    const x = c % W, y = (c / W) | 0;
+    if (cnt8(x, y) >= 2 && simple(x, y)) M[c] = 0;
+  }
+  // 4-connected corners (two perpendicular neighbours only) collapse into a diagonal link
+  for (let c = 0; c < N; c++) {
+    if (!M[c] || blob[c]) continue;
+    const x = c % W, y = (c / W) | 0;
+    if (cnt8(x, y) !== 2) continue;
+    const v = RING.map(r => get(x + r[0], y + r[1]));
+    if ((v[0] && v[2]) || (v[2] && v[4]) || (v[4] && v[6]) || (v[6] && v[0])) M[c] = 0;
+  }
+  // paint: dropped cells take the colour of a neighbouring non-outline cell, new line cells the mean colour of their outline pixels
+  const isOld = i => d[i * 4 + 3] > 0 && lumAt(d, i * 4) <= darkThr2;
+  const old = new Uint8Array(N); for (let i = 0; i < N; i++) old[i] = isOld(i) ? 1 : 0;
+  for (let c = 0; c < N; c++) {
+    const x = c % W, y = (c / W) | 0;
+    if (M[c]) {
+      if (!old[c] && sn[c]) { d[c * 4] = Math.round(sr[c] / sn[c]); d[c * 4 + 1] = Math.round(sg[c] / sn[c]); d[c * 4 + 2] = Math.round(sb[c] / sn[c]); d[c * 4 + 3] = 255; }
+    } else if (old[c]) {
+      let from = -1;
+      for (const k of [0, 2, 4, 6, 1, 3, 5, 7]) {
+        const X = x + RING[k][0], Y = y + RING[k][1];
+        if (X >= 0 && Y >= 0 && X < W && Y < H && !M[Y * W + X] && !old[Y * W + X]) { from = Y * W + X; break; }
+      }
+      if (from >= 0) d.copyWithin(c * 4, from * 4, from * 4 + 4); else d[c * 4 + 3] = 0;
+    }
+  }
+}
 // ---------- rebuild ----------
 let pending = false;
 function schedule() { if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; rebuild(); }); } }
@@ -1253,8 +1563,15 @@ $('resizeOn').addEventListener('change', () => {
   if ($('resizeOn').checked && preSize.w) { if (!+$('rw').value) $('rw').value = preSize.w; if (!+$('rh').value) $('rh').value = preSize.h; }
   schedule();
 });
-$('rw').addEventListener('input', schedule);
-$('rh').addEventListener('input', schedule);
+// keep the aspect ratio of the pre-resize image while one of the two sizes is edited
+function syncRatio(from) {
+  if (!$('keepRatio').checked || !preSize.w || !preSize.h) return;
+  if (from === 'rw') { const v = +$('rw').value; if (v > 0) $('rh').value = Math.max(1, Math.round(v * preSize.h / preSize.w)); }
+  else { const v = +$('rh').value; if (v > 0) $('rw').value = Math.max(1, Math.round(v * preSize.w / preSize.h)); }
+}
+$('rw').addEventListener('input', () => { syncRatio('rw'); schedule(); });
+$('rh').addEventListener('input', () => { syncRatio('rh'); schedule(); });
+$('keepRatio').addEventListener('change', () => { syncRatio('rw'); schedule(); });
 $('makeSquare').addEventListener('change', schedule);
 function rebuild() {
   if (!img) return;
@@ -1276,7 +1593,7 @@ function rebuild() {
     rects.push(r);
     out.data.set(c, (y * W + x) * 4);
   }
-  if (outlineW > 1) thinOutline(out.data, rects, W, H);
+  if (outlineW > 1) { addEdgeCells(out.data, rects, W, H); thinOutline(out.data, rects, W, H); lineOutline(out.data, rects, W, H); }
   const bgMsg = applyBg(out.data, W, H);
   const fin = postProcess(out.data, W, H);
   outC.width = fin.w; outC.height = fin.h;
