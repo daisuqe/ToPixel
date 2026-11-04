@@ -362,6 +362,7 @@ function loadBlob(blob) {
       c.width = Math.max(1, Math.round(im.naturalWidth * k)); c.height = Math.max(1, Math.round(im.naturalHeight * k));
       c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
       origC = c;
+      $('keepRatio').checked = false;   // a new image starts with the ratio lock off
       setSource();
     } catch (e) { alert(t('画像を読み込めませんでした')); }
   };
