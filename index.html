@@ -603,6 +603,7 @@ function dpBounds(e, p0, cp) {
   return b;
 }
 // masked colour difference between two pixel offsets (transparent colour is ignored)
+let brightLine = false;   // true: the outline is a bright line (white lines on black), the dark/bright test is inverted
 let lineCache = null;   // thickness map + skeleton of the outline mask (computed once per image)
 let dark = null, dark2 = null, outlineW = 1, darkThr = 0, darkThr2 = 0;   // dark2 / darkThr2: the stricter mask of the real outline (not dark shading)   // dark = outline-coloured pixel mask
 function pd(i, k) {
@@ -612,7 +613,7 @@ function pd(i, k) {
 }
 function computeDark() {
   const { w, h, data } = img, hist = new Uint32Array(256);
-  const lum = i => (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
+  const lum = i => { const l = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0; return brightLine ? 255 - l : l; };
   let n = 0;
   for (let i = 0; i < w * h; i++) if (data[i * 4 + 3] >= 128) { hist[lum(i * 4)]++; n++; }
   dark = new Uint8Array(w * h);
@@ -626,6 +627,7 @@ function computeDark() {
   for (let i = 0; i < w * h; i++) if (data[i * 4 + 3] >= 128) { const l = lum(i * 4); if (l <= thr) dark[i] = 1; if (l <= darkThr2) dark2[i] = 1; }
 }
 // true when the dark strokes are about one dot wide (typical 1px outline)
+let thinRuns = 0;   // number of one-dot-wide runs found by the last judgeOutline call
 function judgeOutline(p) {
   if (!(p >= 2)) return false;
   const { w, h } = img, runs = [];
@@ -643,6 +645,7 @@ function judgeOutline(p) {
   for (let x = 0; x < w; x += 2) cols.push(x);
   scan(w, rows, (y, x) => y * w + x);
   scan(h, cols, (x, y) => y * w + x);
+  thinRuns = runs.length;
   if (runs.length < 40) return false;
   runs.sort((a, b) => a - b);
   const med = runs[runs.length >> 1] / p;
@@ -795,7 +798,15 @@ function autoDetect(force, pick) {
     outlineW = 1;
     const ex0 = edgeProfile(true), ey0 = edgeProfile(false);
     const p0 = ((estimatePitch(ex0) || 0) + (estimatePitch(ey0) || 0)) / 2;
-    $('outline1').checked = nativeShare() < 0.2 && judgeOutline(p0);
+    // dark outline or bright outline (white lines on a black fill)? the polarity with more one-dot-wide strokes wins
+    const native = nativeShare() >= 0.2;
+    brightLine = false; computeDark();
+    const okD = !native && judgeOutline(p0), nD = thinRuns;
+    brightLine = true; computeDark();
+    const okB = !native && judgeOutline(p0), nB = thinRuns;
+    brightLine = okB && (!okD || nB > nD * 1.5);
+    computeDark();
+    $('outline1').checked = brightLine ? okB : okD;
   }
   outlineW = $('outline1').checked ? 3 : 1;
   if (!pick) cands = buildCands();
@@ -944,7 +955,7 @@ function cellColor(x0, y0, x1, y1, t, m) {
 const EDGE_MIN = 0.3, TIP_MIN = 0.15;   // TIP_MIN: lower limit for cells that continue the end of a line
 function addEdgeCells(d, rects, W, H) {
   const { w, h, data } = img;
-  const isO = i => d[i * 4 + 3] > 0 && lumAt(d, i * 4) <= darkThr2;
+  const isO = i => d[i * 4 + 3] > 0 && olumAt(d, i * 4) <= darkThr2;
   const nOut = (x, y) => { let c = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const X = x + dx, Y = y + dy; if ((dx || dy) && X >= 0 && Y >= 0 && X < W && Y < H && isO(Y * W + X)) c++; } return c; };
   for (let pass = 0; pass < 3; pass++) {
     const add = [];
@@ -977,7 +988,7 @@ function addEdgeCells(d, rects, W, H) {
 // S = the image the rects refer to: { w, h, dark } (dark = outline mask); thr = outline luminance limit
 function thinOutline(d, rects, W, H, S = { w: img.w, h: img.h, dark }, thr = darkThr) {
   const { w, h, dark: dk } = S;
-  const isO = i => d[i * 4 + 3] > 0 && lumAt(d, i * 4) <= thr;
+  const isO = i => d[i * 4 + 3] > 0 && olumAt(d, i * 4) <= thr;
   const count = r => {   // dark pixel count inside rect r
     let n = 0;
     for (let y = Math.max(0, Math.floor(r[1])); y < Math.min(h, Math.ceil(r[3])); y++)
@@ -1023,7 +1034,7 @@ function thinOutline(d, rects, W, H, S = { w: img.w, h: img.h, dark }, thr = dar
   const RING = [[0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1]];
   const M = new Uint8Array(W * H);
   const thr2 = Math.min(thr, darkThr2 || thr);
-  for (let i = 0; i < W * H; i++) M[i] = d[i * 4 + 3] > 0 && lumAt(d, i * 4) <= thr2 ? 1 : 0;
+  for (let i = 0; i < W * H; i++) M[i] = d[i * 4 + 3] > 0 && olumAt(d, i * 4) <= thr2 ? 1 : 0;
   const get = (x, y) => x >= 0 && y >= 0 && x < W && y < H ? M[y * W + x] : 0;
   const run = (x, y, dx, dy) => { let n = 1; for (let k = 1; get(x + dx * k, y + dy * k); k++) n++; for (let k = 1; get(x - dx * k, y - dy * k); k++) n++; return n; };
   const comps = (cells, adj) => {   // number of connected groups among ring cells
@@ -1242,7 +1253,7 @@ function lineOutline(d, rects, W, H) {
   }
   for (let c = 0; c < N; c++) if (near[c] && M0[c]) M[c] = 1;
   // paint: dropped cells take the colour of a neighbouring non-outline cell, new line cells the mean colour of their outline pixels
-  const isOld = i => d[i * 4 + 3] > 0 && lumAt(d, i * 4) <= darkThr2;
+  const isOld = i => d[i * 4 + 3] > 0 && olumAt(d, i * 4) <= darkThr2;
   const old = new Uint8Array(N); for (let i = 0; i < N; i++) old[i] = isOld(i) ? 1 : 0;
   for (let c = 0; c < N; c++) {
     const x = c % W, y = (c / W) | 0;
@@ -1276,6 +1287,7 @@ function cellRange(off, p, len) {
 // ---------- forced resize (uniform scale that keeps 1px outlines) ----------
 let preSize = { w: 0, h: 0 };
 const lumAt = (d, i) => d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+const olumAt = (d, i) => brightLine ? 255 - lumAt(d, i) : lumAt(d, i);   // 'darkness' in terms of the outline polarity
 function darkThreshold(d) {
   const hist = new Uint32Array(256); let n = 0;
   for (let i = 0; i < d.length; i += 4) if (d[i + 3] >= 128) { hist[lumAt(d, i) | 0]++; n++; }
