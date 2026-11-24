@@ -92,6 +92,12 @@
     </select></div>
   <div class="hint">AI生成画像のようにドット幅が揺れる場合は不均一。数値を手で変えると均一に切り替わります</div>
   <label class="chk"><input type="checkbox" id="outline1">輪郭を1ピクセルに寄せる</label>
+  <div class="ctl"><label><span>輪郭線の色</span></label>
+    <select id="lineColor" style="width:100%;background:#181a1f;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px">
+      <option value="auto">自動抽出</option>
+      <option value="black">黒(暗い線)</option>
+      <option value="white">白(明るい線)</option>
+    </select></div>
   <div class="hint">読み込み時に自動判定します。ONだと暗い輪郭線の境目にグリッドを優先して合わせます</div>
   <label class="chk"><input type="checkbox" id="square" checked>縦横の平均サイズを同じにする</label>
   <div id="gridCtl"></div>
@@ -179,6 +185,10 @@ const T = {
   '等倍': { en: 'Native (1:1)', ko: '등배(1:1)', zh: '原始大小(1:1)' },
   '検出: 等倍(1ドット=1px)のため、そのまま出力します': { en: 'Detected: already 1 dot = 1 px, output as is', ko: '감지: 이미 1도트=1px이므로 그대로 출력합니다', zh: '检测:已是 1 点=1 像素,按原样输出' },
   '縦横比を保持する': { en: 'Keep aspect ratio', ko: '가로세로 비율 유지', zh: '保持纵横比' },
+  '輪郭線の色': { en: 'Outline colour', ko: '윤곽선 색', zh: '轮廓线颜色' },
+  '自動抽出': { en: 'Auto', ko: '자동 추출', zh: '自动提取' },
+  '黒(暗い線)': { en: 'Black (dark lines)', ko: '검정(어두운 선)', zh: '黑色(深色线)' },
+  '白(明るい線)': { en: 'White (bright lines)', ko: '흰색(밝은 선)', zh: '白色(亮色线)' },
   '総合': { en: 'Combined', ko: '종합', zh: '综合' },
   '塗りの段差幅': { en: 'Colour step width', ko: '색 단차 폭', zh: '色块台阶宽度' },
   '輪郭線の太さ': { en: 'Outline thickness', ko: '윤곽선 두께', zh: '轮廓线粗细' },
@@ -339,6 +349,7 @@ $('gridMode').addEventListener('change', () => {
   if (grid && $('gridMode').value !== 'uniform') { applyWarp(); schedule(); } else autoDetect('keep');
 });
 $('outline1').addEventListener('change', () => autoDetect('keep'));
+$('lineColor').addEventListener('change', () => { if (img) autoDetect(); });
 $('square').addEventListener('change', () => {
   if ($('gridMode').value !== 'uniform' && img) { autoDetect('keep', curPick); return; }
   if ($('square').checked) { setP('ph', P.pw); schedule(); }
@@ -799,14 +810,14 @@ function autoDetect(force, pick) {
     const ex0 = edgeProfile(true), ey0 = edgeProfile(false);
     const p0 = ((estimatePitch(ex0) || 0) + (estimatePitch(ey0) || 0)) / 2;
     // dark outline or bright outline (white lines on a black fill)? the polarity with more one-dot-wide strokes wins
-    const native = nativeShare() >= 0.2;
+    const native = nativeShare() >= 0.2, mode = $('lineColor').value;
     brightLine = false; computeDark();
     const okD = !native && judgeOutline(p0), nD = thinRuns;
     brightLine = true; computeDark();
     const okB = !native && judgeOutline(p0), nB = thinRuns;
-    brightLine = okB && (!okD || nB > nD * 1.5);
+    brightLine = mode === 'white' || (mode === 'auto' && okB && (!okD || nB > nD * 1.5));
     computeDark();
-    $('outline1').checked = brightLine ? okB : okD;
+    $('outline1').checked = mode === 'auto' ? (brightLine ? okB : okD) : !native;   // a colour chosen by hand turns the 1px outline on
   }
   outlineW = $('outline1').checked ? 3 : 1;
   if (!pick) cands = buildCands();
