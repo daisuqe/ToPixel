@@ -319,8 +319,8 @@ function makeCtl(parent, key, label, min, max, step, onChange) {
 }
 function setP(key, v) { ctls[key].set(v, false); }
 
-makeCtl($('gridCtl'), 'pw', t('ドット幅 (px)'), 1, 128, 0.01, userGrid);
-makeCtl($('gridCtl'), 'ph', t('ドット高さ (px)'), 1, 128, 0.01, userGrid);
+makeCtl($('gridCtl'), 'pw', t('ドット幅 (px)'), 1, 20, 0.01, userGrid);
+makeCtl($('gridCtl'), 'ph', t('ドット高さ (px)'), 1, 20, 0.01, userGrid);
 makeCtl($('gridCtl'), 'ox', t('横オフセット (px)'), 0, 128, 0.01, userGrid);
 makeCtl($('gridCtl'), 'oy', t('縦オフセット (px)'), 0, 128, 0.01, userGrid);
 makeCtl($('gridCtl'), 'warp', t('歪み許容量 (グリッド幅の%)'), 0, 50, 1, warpChanged);
